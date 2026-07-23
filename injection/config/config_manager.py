@@ -141,29 +141,53 @@ class ConfigManager:
             log.warning(f"Failed to save config file: {e}")
     
     @staticmethod
-    def infer_client_path_from_league_path(league_path: str) -> Optional[str]:
-        """Infer client path from league path.
-        League path is typically in a 'Game' subdirectory, so client path is the parent.
-        Returns None if inference is not possible."""
+    def infer_client_path_from_league_path(
+        league_path: str,
+    ) -> Optional[str]:
+        """Infer LeagueClient.exe directory from the game directory.
+    
+        Supports both Riot's standard layout and WeGame's layout:
+    
+            LOL/
+            ├── Game/
+            └── LeagueClient/
+        """
         if not league_path or not league_path.strip():
             return None
-        
+    
         try:
             league_dir = Path(league_path.strip())
-            # If league path ends with "Game", client is the parent
-            if league_dir.name == "Game":
-                client_dir = league_dir.parent
-                client_exe = client_dir / "LeagueClient.exe"
-                if client_exe.exists():
+    
+            candidates = []
+    
+            if league_dir.name.casefold() == "game":
+                root_dir = league_dir.parent
+    
+                candidates.extend([
+                    root_dir / "LeagueClient",  # WeGame layout
+                    root_dir,                   # Standard layout
+                ])
+    
+            candidates.extend([
+                league_dir.parent / "LeagueClient",
+                league_dir.parent,
+            ])
+    
+            seen = set()
+    
+            for client_dir in candidates:
+                normalized = str(client_dir).casefold()
+    
+                if normalized in seen:
+                    continue
+    
+                seen.add(normalized)
+    
+                if (client_dir / "LeagueClient.exe").is_file():
                     return str(client_dir)
-            
-            # Try parent directory structure
-            parent_dir = league_dir.parent
-            client_exe = parent_dir / "LeagueClient.exe"
-            if client_exe.exists():
-                return str(parent_dir)
-            
+    
             return None
-        except Exception:
+    
+        except (OSError, ValueError):
             return None
 
