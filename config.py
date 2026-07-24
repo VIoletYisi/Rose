@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 # APPLICATION METADATA
 # =============================================================================
 
-APP_VERSION = "1.2.11"                          # Application version
+APP_VERSION = "1.2.12"                          # Application version
 APP_USER_AGENT = f"Rose/{APP_VERSION}"  # User-Agent header for HTTP requests
 
 _CONFIG = configparser.ConfigParser()
@@ -109,6 +109,7 @@ def set_config_option(section: str, option: str, value: str) -> None:
 
 # Skin matching
 SKIN_NAME_MIN_SIMILARITY = 0.7  # Minimum similarity for fuzzy skin name matching
+LATE_LOCK_SKIN_CACHE_MAX_AGE_S = 5.0  # Do not replay skin text older than this after late lock recovery
 
 # =============================================================================
 # THREAD POLLING INTERVALS

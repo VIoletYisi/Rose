@@ -2,8 +2,8 @@
 ; This creates a proper Windows installer that registers the app
 
 #define MyAppName "Rose"
-#define MyAppVersion "1.2.11"
-#define MyAppVersionInfo "1.2.11.0"
+#define MyAppVersion "1.2.12"
+#define MyAppVersionInfo "1.2.12.0"
 #define MyAppPublisher "Rose Team"
 #define MyAppURL "https://github.com/Alban1911/Rose"
 #define MyAppExeName "Rose.exe"
@@ -65,7 +65,7 @@ Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Fil
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}} (as Administrator)"; Flags: nowait postinstall skipifsilent shellexec; Verb: runas
 
 [UninstallRun]
-; Uninstall Pengu Loader (removes d3d9.dll hook from the League directory)
+; Uninstall Pengu Loader (removes its IFEO activation and disables the native hook)
 Filename: "{localappdata}\Rose\Pengu Loader\Pengu Loader.exe"; Parameters: "--uninstall --silent"; Flags: runhidden waituntilterminated skipifdoesntexist
 ; Always remove the Rose auto-start scheduled task (created via schtasks /TN "Rose")
 Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN Rose /F"; Flags: runhidden

@@ -6,7 +6,7 @@
  */
 (function initSettingsPanel() {
   const LOG_PREFIX = "[Rose-SettingsPanel]";
-  const DISCORD_INVITE_URL = "https://discord.gg/roseapp";
+  const DISCORD_INVITE_URL = "https://discord.com/invite/roseskins";
   const KOFI_URL = "https://ko-fi.com/roseapp";
   const GITHUB_URL = "https://github.com/Alban1911/Rose";
 
@@ -1915,14 +1915,10 @@
         });
       }
 
-      // Force focus to body or another element to ensure dropdown loses focus
-      if (document.body) {
-        document.body.focus();
-      }
-      // Remove focus completely
-      if (document.activeElement && document.activeElement !== document.body) {
-        document.activeElement.blur();
-      }
+      // Do not blur document.activeElement globally here. The delayed cleanup
+      // runs after opening dialogs too, so the active element may already be
+      // the champion search input. Blurring it makes the first click appear
+      // to be ignored and removes the caret from the input.
     };
 
     // Function to reset dropdown to placeholder and close it

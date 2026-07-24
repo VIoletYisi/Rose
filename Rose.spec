@@ -35,19 +35,11 @@ import os
 # NOTE: cslol-dll.dll is NOT included - users must provide their own due to DMCA
 injection_binaries = [
     'injection/tools/mod-tools.exe',
-    'injection/tools/cslol-diag.exe',
-    'injection/tools/wad-extract.exe',
-    'injection/tools/wad-make.exe',
 ]
-
-# Data files (batch scripts, text files, etc.)
+# Data files (text files, etc.)
 injection_data_files = [
-    'injection/tools/wad-extract-multi.bat',
-    'injection/tools/wad-make-multi.bat',
-    'injection/tools/wxy-extract-multi.bat',
     'injection/tools/hashes.game.txt',
 ]
-
 # Verify and add injection binaries
 binaries = []
 missing_binaries = []
@@ -94,7 +86,7 @@ try:
 except Exception as e:
     print(f"[WARNING] Could not collect Pillow data files: {e}")
 
-# Include Pengu Loader directory (for Pengu activation/deactivation CLI)
+# Include the source-built Pengu Loader runtime used for Rose activation/deactivation
 # Runtime-generated files (logs, per-user state) must be excluded so they don't
 # leak local test data into the shipped installer.
 pengu_loader_dir = Path('Pengu Loader')
@@ -117,6 +109,9 @@ def _pengu_path_excluded(rel_path: Path) -> bool:
     return False
 
 if pengu_loader_dir.exists() and pengu_loader_dir.is_dir():
+    if not (pengu_loader_dir / 'Pengu Loader.exe').exists():
+        raise RuntimeError("Source-built Pengu Loader.exe is missing. Run build_pyinstaller.py first.")
+
     bundled_count = 0
     skipped = []
     for src in pengu_loader_dir.rglob('*'):

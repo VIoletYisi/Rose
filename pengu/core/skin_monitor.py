@@ -72,7 +72,14 @@ class PenguSkinMonitorThread(threading.Thread):
         self.skin_mapping = SkinMapping(shared_state)
         self.skin_processor = SkinProcessor(shared_state, skin_scraper, self.skin_mapping)
         self.flow_controller = FlowController(shared_state)
-        self.mod_storage_service = ModStorageService(watch_archives=True)
+        self.mod_storage_service = ModStorageService(
+            watch_archives=True,
+            champion_name_resolver=(
+                self.lcu.get_champion_name_by_id
+                if self.lcu is not None
+                else None
+            ),
+        )
 
         # Initialize HTTP handler
         self.http_handler = HTTPHandler(self.port)
@@ -125,6 +132,9 @@ class PenguSkinMonitorThread(threading.Thread):
         self.skin_processor.clear_cache()
         self.shared_state.ui_skin_id = None
         self.shared_state.ui_last_text = None
+        self.shared_state.ui_last_text_champion_id = None
+        self.shared_state.ui_last_text_generation = -1
+        self.shared_state.ui_last_text_timestamp = 0.0
 
     def clear_cache(self) -> None:
         """
@@ -134,6 +144,9 @@ class PenguSkinMonitorThread(threading.Thread):
         self.skin_mapping.clear()
         self.shared_state.ui_skin_id = None
         self.shared_state.ui_last_text = None
+        self.shared_state.ui_last_text_champion_id = None
+        self.shared_state.ui_last_text_generation = -1
+        self.shared_state.ui_last_text_timestamp = 0.0
 
     def _handle_message(self, message: str) -> None:
         """Handle incoming WebSocket message (delegates to message handler)"""
