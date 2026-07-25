@@ -95,9 +95,14 @@ namespace PenguLoader.Main
                 ApplyUpdate(updateDir);
                 Environment.Exit(0);
             }
-            catch
+            catch (Exception ex)
             {
                 cancel = true;
+                Logger.Error(
+                    "Updater",
+                    "Failed to download or apply the update",
+                    ex
+                );
 
                 MainWindow.Instance.Show();
                 MessageBox.Show(MainWindow.Instance,
@@ -153,6 +158,7 @@ namespace PenguLoader.Main
             }
             catch (Exception ex)
             {
+                Logger.Error("Updater", "Failed to check update", ex);
                 MessageBox.Show(MainWindow.Instance,
                     "Failed to check update.\n" + ex.Message,
                     Program.Name, MessageBoxButton.OK, MessageBoxImage.Warning);

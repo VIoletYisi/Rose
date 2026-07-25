@@ -35,6 +35,7 @@ import os
 # NOTE: cslol-dll.dll is NOT included - users must provide their own due to DMCA
 injection_binaries = [
     'injection/tools/mod-tools.exe',
+    'injection/tools/wad-extract.exe',
 ]
 # Data files (text files, etc.)
 injection_data_files = [
@@ -91,26 +92,21 @@ except Exception as e:
 # leak local test data into the shipped installer.
 pengu_loader_dir = Path('Pengu Loader')
 PENGU_LOADER_EXCLUDED_ROOT_NAMES = {
-    'rose.log',
-    'crash.log',
     'config',
     'datastore',
 }
-PENGU_LOADER_EXCLUDED_SUFFIXES = {'.log'}
 
 def _pengu_path_excluded(rel_path: Path) -> bool:
-    # Exclude only from root folder
+    name = rel_path.name.lower()
+
     if rel_path.parts and rel_path.parts[0].lower() in PENGU_LOADER_EXCLUDED_ROOT_NAMES:
         return True
-    
-    # Exclude from any folders in /Pengu Loader/*
-    if rel_path.suffix.lower() in PENGU_LOADER_EXCLUDED_SUFFIXES:
-        return True
-    return False
+
+    return name.endswith('.log') or name.endswith('.log.old')
 
 if pengu_loader_dir.exists() and pengu_loader_dir.is_dir():
     if not (pengu_loader_dir / 'Pengu Loader.exe').exists():
-        raise RuntimeError("Source-built Pengu Loader.exe is missing. Run build_pyinstaller.py first.")
+        raise RuntimeError("Source-built Pengu Loader.exe is missing. Run scripts/build_pyinstaller.py first.")
 
     bundled_count = 0
     skipped = []
