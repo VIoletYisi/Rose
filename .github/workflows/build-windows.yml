@@ -8,13 +8,14 @@ on:
       - "**/*.py"
       - "requirements.txt"
       - "Rose.spec"
-      - "build_pyinstaller.py"
+      - "scripts/**"
+      - "vendor/**"
       - ".github/workflows/build-windows.yml"
 
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -26,7 +27,10 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install dependencies
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install Python dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
@@ -35,7 +39,7 @@ jobs:
       - name: Build Rose
         shell: pwsh
         run: |
-          python build_pyinstaller.py
+          python scripts/build_pyinstaller.py
 
       - name: Verify build
         shell: pwsh
@@ -44,8 +48,8 @@ jobs:
               throw "Build failed: dist\Rose\Rose.exe was not generated."
           }
 
-          Get-ChildItem "dist\Rose"
           Write-Host "Rose.exe generated successfully."
+          Get-ChildItem "dist\Rose"
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4
