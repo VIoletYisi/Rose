@@ -35,20 +35,20 @@ class PenguLoaderIntegrationTests(unittest.TestCase):
     def _result(args, code=0, stdout='', stderr=''):
         return CompletedProcess(args, code, stdout=stdout, stderr=stderr)
 
-    def test_no_managed_commands_are_used(self):
-        source = Path(pengu_loader.__file__).read_text(encoding='utf-8')
-        loader_source = Path('vendor/PenguLoader-1.1.6/loader/Program.cs').read_text(encoding='utf-8')
-        logger_source = Path(
-            'vendor/PenguLoader-1.1.6/loader/Main/Logger.cs'
-        ).read_text(encoding='utf-8')
+    def test_official_loader_boundary_is_preserved(self):
+        integration_source = Path(pengu_loader.__file__).read_text(encoding='utf-8')
+        program_source = Path('vendor/PenguLoader-1.1.6/loader/Program.cs').read_text(encoding='utf-8')
+        ifeo_source = Path('vendor/PenguLoader-1.1.6/loader/Main/IFEO.cs').read_text(encoding='utf-8')
+
         for forbidden in ('--rose-managed', '--rose-stop', '--force-deactivate', 'taskkill'):
-            self.assertNotIn(forbidden, source)
-            self.assertNotIn(forbidden, loader_source)
-        self.assertIn('if (active && Module.IsLoaded)', loader_source)
-        self.assertIn('pengu.log', logger_source)
-        for obsolete in ('crash.log', 'CrashLogPath', 'LogFailure('):
-            self.assertNotIn(obsolete, loader_source)
-            self.assertNotIn(obsolete, logger_source)
+            self.assertNotIn(forbidden, integration_source)
+            self.assertNotIn(forbidden, program_source)
+
+        self.assertIn('if (!createdNew || (active && Module.IsLoaded))', program_source)
+        self.assertIn('reg add', ifeo_source)
+        self.assertIn('reg delete', ifeo_source)
+        self.assertFalse(Path('vendor/PenguLoader-1.1.6/loader/Main/Elevation.cs').exists())
+        self.assertFalse(Path('vendor/PenguLoader-1.1.6/loader/Main/Win32Registry.cs').exists())
 
     def test_legacy_pengu_logs_are_removed(self):
         for filename in ('rose.log', 'rose.log.old', 'crash.log'):
@@ -77,8 +77,8 @@ class PenguLoaderIntegrationTests(unittest.TestCase):
         self.assertIn('_remove_legacy_pengu_logs(runtime_dir)', source)
         self.assertIn('name.endswith(\'.log\')', spec_source)
         self.assertIn('name.endswith(\'.log.old\')', spec_source)
-        self.assertIn('Logger.Error("CLI"', program_source)
-        self.assertIn('Failed to download or apply the update', updater_source)
+        self.assertIn('public static async void CheckUpdate()', updater_source)
+        self.assertIn('ApplyUpdate(updateDir)', updater_source)
 
     @patch.object(pengu_loader, '_is_available', return_value=True)
     @patch.object(pengu_loader.subprocess, 'run')
@@ -88,7 +88,7 @@ class PenguLoaderIntegrationTests(unittest.TestCase):
             self._result([], stdout='Pengu is currently ACTIVE.'),
         ]
         self.assertTrue(pengu_loader.activate())
-        self.assertEqual(run.call_args_list[0].args[0][1:], ['--install', '--activate', '--silent'])
+        self.assertEqual(run.call_args_list[0].args[0][1:], ['--install', '--silent'])
         self.assertEqual(run.call_args_list[1].args[0][1:], ['--status', '--silent'])
 
     @patch.object(pengu_loader, '_is_available', return_value=True)
@@ -99,7 +99,7 @@ class PenguLoaderIntegrationTests(unittest.TestCase):
             self._result([], code=1, stdout='Pengu is currently INACTIVE.'),
         ]
         self.assertTrue(pengu_loader.deactivate())
-        self.assertEqual(run.call_args_list[0].args[0][1:], ['--uninstall', '--deactivate', '--silent'])
+        self.assertEqual(run.call_args_list[0].args[0][1:], ['--uninstall', '--silent'])
 
     @patch.object(pengu_loader, '_is_available', return_value=True)
     @patch.object(pengu_loader, 'get_status', return_value=pengu_loader.PenguStatus.INACTIVE)
