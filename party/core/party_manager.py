@@ -45,8 +45,10 @@ class PartyManager:
         self.party_state = PartyState()
 
         # Networking
-        self._my_key: Optional[bytes] = None
-        self._my_token: Optional[PartyToken] = None
+        # Every member retains the active host room's invite material. The
+        # token itself expires, but its key and resulting room remain stable.
+        self._invite_key: Optional[bytes] = None
+        self._invite_token: Optional[PartyToken] = None
         self._relay: Optional[PartyRelay] = None
         self._active_room_key: Optional[str] = None
         self._active_invite_token: Optional[str] = None
@@ -111,15 +113,15 @@ class PartyManager:
             self.party_state.my_summoner_name = my_summoner_name
 
             # Generate key and token
-            self._my_key = secrets.token_bytes(32)
-            self._my_token = create_token(
+            self._invite_key = secrets.token_bytes(32)
+            self._invite_token = create_token(
                 summoner_id=my_summoner_id,
-                encryption_key=self._my_key,
+                encryption_key=self._invite_key,
             )
 
-            token_str = self._my_token.encode()
+            token_str = self._invite_token.encode()
 
-            room_key = compute_room_key(my_summoner_id, self._my_key)
+            room_key = compute_room_key(my_summoner_id, self._invite_key)
             self.party_state.set_connection_status("connecting")
             self._notify_state_change()
 
@@ -171,8 +173,8 @@ class PartyManager:
             self._active_invite_token = None
             self._host_summoner_id = None
             self._room_role = "none"
-            self._my_key = None
-            self._my_token = None
+            self._invite_key = None
+            self._invite_token = None
             self.party_state.clear_all()
             self.party_state.set_connection_status("error", error=str(e))
             self._notify_state_change()
@@ -211,8 +213,8 @@ class PartyManager:
                 self._relay = None
 
         self.party_state.clear_all()
-        self._my_key = None
-        self._my_token = None
+        self._invite_key = None
+        self._invite_token = None
         self._active_room_key = None
         self._active_invite_token = None
         self._host_summoner_id = None
@@ -252,6 +254,11 @@ class PartyManager:
                         token.summoner_id,
                         timeout=MEMBER_CONFIRM_TIMEOUT,
                     ):
+                        self._invite_key = token.encryption_key
+                        self._invite_token = token
+                        self._active_invite_token = token_str
+                        self.party_state.my_token = token_str
+                        self._notify_state_change()
                         log.info("[PARTY] Already in requested party room")
                         return True, None
                     return False, "Party host is not online"
@@ -288,6 +295,8 @@ class PartyManager:
 
                 old_relay = self._relay
                 self._relay = candidate
+                self._invite_key = token.encryption_key
+                self._invite_token = token
                 self._active_room_key = target_room_key
                 self._active_invite_token = token_str
                 self._host_summoner_id = token.summoner_id
@@ -662,31 +671,44 @@ class PartyManager:
                 log.info(f"[PARTY] Skin broadcast error: {e}")
 
     async def _token_refresh_loop(self):
-        """Refresh the host invite without changing its room key."""
+        """Refresh the active invite without changing its room key.
+
+        Guests know the host key from the token they used to join, so they can
+        refresh the same room invite locally instead of displaying an expired
+        token after one hour.
+        """
         try:
             while self._running:
                 await asyncio.sleep(TOKEN_REFRESH_CHECK_INTERVAL)
                 if (
-                    self._room_role != "host"
-                    or not self._my_token
-                    or not self._my_key
-                    or not self.party_state.my_summoner_id
+                    not self._invite_token
+                    or not self._invite_key
+                    or not self._host_summoner_id
                 ):
                     continue
-                if self._my_token.time_until_expiry() > TOKEN_REFRESH_THRESHOLD:
+                if (
+                    self._invite_token.time_until_expiry()
+                    > TOKEN_REFRESH_THRESHOLD
+                ):
                     continue
 
-                self._my_token = create_token(
-                    summoner_id=self.party_state.my_summoner_id,
-                    encryption_key=self._my_key,
-                )
-                token_str = self._my_token.encode()
-                self._active_invite_token = token_str
-                self.party_state.my_token = token_str
-                self._notify_state_change()
-                log.info("[PARTY] Refreshed party invite token")
+                self._refresh_active_invite_token()
         except asyncio.CancelledError:
             return
+
+    def _refresh_active_invite_token(self) -> Optional[str]:
+        if not self._invite_key or not self._host_summoner_id:
+            return None
+        self._invite_token = create_token(
+            summoner_id=self._host_summoner_id,
+            encryption_key=self._invite_key,
+        )
+        token_str = self._invite_token.encode()
+        self._active_invite_token = token_str
+        self.party_state.my_token = token_str
+        self._notify_state_change()
+        log.info("[PARTY] Refreshed active room invite token")
+        return token_str
 
     @staticmethod
     def _member_summoner_id(member: dict) -> int:

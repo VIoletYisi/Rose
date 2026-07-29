@@ -164,6 +164,37 @@ class PartyManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([200], manager.party_state.get_peer_ids())
             await manager.disable()
 
+    async def test_guest_refreshes_same_host_room_invite(self):
+        manager = PartyManager(self.lcu, self.shared_state)
+        host_token = create_token(200)
+        target_room = compute_room_key(
+            host_token.summoner_id,
+            host_token.encryption_key,
+        )
+        FakeRelay.room_members[target_room] = [{
+            "summoner_id": 200,
+            "summoner_name": "Host",
+        }]
+
+        with patch("party.core.party_manager.PartyRelay", FakeRelay):
+            await manager.enable()
+            success, error = await manager.add_peer(host_token.encode())
+            refreshed = manager._refresh_active_invite_token()
+            decoded = type(host_token).decode(refreshed)
+
+            self.assertTrue(success)
+            self.assertIsNone(error)
+            self.assertEqual(200, decoded.summoner_id)
+            self.assertEqual(host_token.encryption_key, decoded.encryption_key)
+            self.assertEqual(
+                target_room,
+                compute_room_key(
+                    decoded.summoner_id,
+                    decoded.encryption_key,
+                ),
+            )
+            await manager.disable()
+
     async def test_unexpected_disconnect_reconnects_to_same_room(self):
         manager = PartyManager(self.lcu, self.shared_state)
 
