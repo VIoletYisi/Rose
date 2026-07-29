@@ -83,4 +83,11 @@ def perform_champ_select_reset(state, lcu) -> bool:
     except Exception as exc:
         log.warning("[reset] Error fetching owned skins: %s", exc)
 
+    try:
+        party_manager = getattr(state, "party_manager", None)
+        if party_manager:
+            party_manager.on_champ_select_reset(state.champ_select_generation)
+    except Exception as exc:
+        log.warning("[reset] Failed to reset Party Mode skin state: %s", exc)
+
     return True

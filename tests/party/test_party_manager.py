@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from party.core.party_manager import PartyManager
 from party.network.ws_relay import compute_room_key
+from party.protocol.message_types import SkinSelection
 from party.protocol.token_codec import create_token
 
 
@@ -99,6 +100,11 @@ class PartyManagerTests(unittest.IsolatedAsyncioTestCase):
             last_hovered_skin_id=None,
             selected_chroma_id=None,
             selected_custom_mod=None,
+            selected_skin_id=None,
+            historic_mode_active=False,
+            historic_skin_id=None,
+            random_mode_active=False,
+            random_skin_id=None,
             phase="Lobby",
         )
 
@@ -177,6 +183,62 @@ class PartyManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("online", manager.party_state.relay_status)
             self.assertEqual(original_room, manager._relay.room_key)
             self.assertIsNot(original_relay, manager._relay)
+            await manager.disable()
+
+    async def test_selection_changes_and_clear_are_broadcast(self):
+        manager = PartyManager(self.lcu, self.shared_state)
+
+        with patch("party.core.party_manager.PartyRelay", FakeRelay):
+            await manager.enable()
+            relay = manager._relay
+            self.assertEqual([None], relay.sent_skins)
+
+            self.shared_state.locked_champ_id = 99
+            self.shared_state.last_hovered_skin_id = 99001
+            await manager.broadcast_skin_update()
+            self.shared_state.last_hovered_skin_id = None
+            await manager.broadcast_skin_update()
+
+            self.assertEqual(
+                {
+                    "champion_id": 99,
+                    "skin_id": 99001,
+                    "chroma_id": None,
+                },
+                relay.sent_skins[-2],
+            )
+            self.assertIsNone(relay.sent_skins[-1])
+            await manager.disable()
+
+    async def test_champ_select_reset_keeps_members_and_clears_skins(self):
+        manager = PartyManager(self.lcu, self.shared_state)
+
+        with patch("party.core.party_manager.PartyRelay", FakeRelay):
+            await manager.enable()
+            relay = manager._relay
+            manager.party_state.add_peer(
+                200,
+                "Teammate",
+                connected=True,
+                connection_state="connected",
+            )
+            selection = SkinSelection(
+                summoner_id=200,
+                summoner_name="Teammate",
+                champion_id=99,
+                skin_id=99001,
+            )
+            manager.party_state.update_peer_skin(200, selection)
+            manager._skin_collector.update_from_peer(selection)
+            manager._team_champions = {200: 99}
+
+            manager.on_champ_select_reset(2)
+            await asyncio.sleep(0)
+
+            self.assertEqual([200], manager.party_state.get_peer_ids())
+            self.assertIsNone(manager.party_state.peers[200].skin_selection)
+            self.assertEqual({}, manager._team_champions)
+            self.assertIsNone(relay.sent_skins[-1])
             await manager.disable()
 
 

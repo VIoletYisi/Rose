@@ -135,10 +135,8 @@ class PartyState:
         """Clear peer skin selection"""
         with self._lock:
             if summoner_id in self.peers:
-                old_selection = self.peers[summoner_id].skin_selection
                 self.peers[summoner_id].skin_selection = None
-                if old_selection:
-                    self.party_skins.pop(summoner_id, None)
+            self.party_skins.pop(summoner_id, None)
 
     def clear_all_skins(self):
         """Clear every peer selection while keeping room membership."""

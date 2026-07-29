@@ -6,6 +6,7 @@ Orchestrator for party mode skin sharing via WebSocket relay.
 """
 
 import asyncio
+import copy
 import secrets
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -28,6 +29,7 @@ MEMBER_CONFIRM_TIMEOUT = 10.0
 RECONNECT_DELAYS = (1.0, 2.0, 4.0, 8.0, 15.0)
 TOKEN_REFRESH_CHECK_INTERVAL = 300.0
 TOKEN_REFRESH_THRESHOLD = 600
+_UNSET = object()
 
 
 class PartyManager:
@@ -50,6 +52,8 @@ class PartyManager:
         self._room_role = "none"
         self._relay_lock = asyncio.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._last_broadcast_payload = _UNSET
+        self._team_champions: Dict[int, int] = {}
 
         # Discovery
         self._lobby_matcher: Optional[LobbyMatcher] = None
@@ -149,6 +153,7 @@ class PartyManager:
             self._token_refresh_task = asyncio.create_task(
                 self._token_refresh_loop()
             )
+            await self.broadcast_skin_update(force=True)
 
             log.info("[PARTY] Party mode enabled")
             self._notify_state_change()
@@ -211,6 +216,8 @@ class PartyManager:
         self._host_summoner_id = None
         self._room_role = "none"
         self._loop = None
+        self._last_broadcast_payload = _UNSET
+        self._team_champions.clear()
 
         log.info("[PARTY] Party mode disabled")
         self._notify_state_change()
@@ -299,6 +306,7 @@ class PartyManager:
                 if old_relay:
                     await old_relay.disconnect()
 
+                await self.broadcast_skin_update(force=True)
                 log.info(
                     f"[PARTY] Joined party room {target_room_key[:8]}..."
                 )
@@ -321,10 +329,12 @@ class PartyManager:
         )
         return False
 
-    async def broadcast_skin_update(self):
-        """Broadcast our current skin selection to the relay room."""
+    async def broadcast_skin_update(self, force: bool = False) -> bool:
+        """Broadcast the effective selection, including an explicit clear."""
         if not self.enabled or not self._relay or not self._relay.connected:
-            return
+            return False
+        if not self._skin_collector:
+            return False
 
         selection = self._skin_collector.get_my_selection(
             self.party_state.my_summoner_id,
@@ -332,29 +342,47 @@ class PartyManager:
         )
 
         if not selection:
-            return
+            skin_data = None
+        else:
+            skin_data = {
+                "champion_id": selection.champion_id,
+                "skin_id": selection.skin_id,
+                "chroma_id": selection.chroma_id,
+            }
 
-        skin_data = {
-            "champion_id": selection.champion_id,
-            "skin_id": selection.skin_id,
-            "chroma_id": selection.chroma_id,
-        }
+            # For custom mods, share a content hash instead of the file path.
+            if selection.custom_mod_path:
+                mod_hash = self._hash_custom_mod(selection.custom_mod_path)
+                if mod_hash:
+                    skin_data["custom_mod_hash"] = mod_hash
+                    skin_data["is_custom"] = True
 
-        # For custom mods, share a content hash instead of the file path
-        if selection.custom_mod_path:
-            mod_hash = self._hash_custom_mod(selection.custom_mod_path)
-            if mod_hash:
-                skin_data["custom_mod_hash"] = mod_hash
-                skin_data["is_custom"] = True
+        return await self._send_skin_payload(skin_data, force=force)
 
-        await self._relay.send_skin(skin_data)
+    async def _send_skin_payload(
+        self,
+        skin_data: Optional[dict],
+        *,
+        force: bool = False,
+    ) -> bool:
+        relay = self._relay
+        if not self.enabled or not relay or not relay.connected:
+            return False
+        if not force and skin_data == self._last_broadcast_payload:
+            return False
+        if not await relay.send_skin(skin_data):
+            return False
+        self._last_broadcast_payload = copy.deepcopy(skin_data)
+        return True
 
     def get_party_skins(self) -> List[PartySkinData]:
         """Get all skin selections for injection."""
         if not self.enabled or not self._lobby_matcher or not self._skin_collector:
             return []
 
-        team_champions = self._lobby_matcher.get_team_champion_mapping()
+        current_team = self._lobby_matcher.get_team_champion_mapping()
+        if current_team:
+            self._team_champions = current_team
 
         # Collect skins from relay members
         return self._skin_collector.collect_relay_skins(
@@ -364,8 +392,49 @@ class PartyManager:
                 else []
             ),
             my_summoner_id=self.party_state.my_summoner_id,
-            team_champions=team_champions,
+            team_champions=dict(self._team_champions),
         )
+
+    def on_champ_select_reset(self, generation: int) -> None:
+        """Clear skin data from the previous game and notify the relay.
+
+        ChampSelect reset can be called from either the HTTP poller thread or
+        the WebSocket thread, while PartyManager's relay runs on its asyncio
+        loop. Keep membership intact and schedule only the skin clear.
+        """
+        self.party_state.clear_all_skins()
+        if self._skin_collector:
+            self._skin_collector.clear_all()
+
+        self._team_champions = {}
+        if self._lobby_matcher:
+            fresh_team = self._lobby_matcher.get_team_champion_mapping()
+            if fresh_team:
+                self._team_champions = fresh_team
+
+        self._last_broadcast_payload = _UNSET
+        self._notify_state_change()
+        log.info(
+            f"[PARTY] Cleared per-game skin state for ChampSelect "
+            f"generation {generation}"
+        )
+
+        loop = self._loop
+        if not self.enabled or not loop or not loop.is_running():
+            return
+
+        async def send_clear():
+            await self._send_skin_payload(None, force=True)
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is loop:
+            loop.create_task(send_clear())
+        else:
+            asyncio.run_coroutine_threadsafe(send_clear(), loop)
 
     def get_state_dict(self) -> dict:
         return self.party_state.to_dict()
@@ -429,19 +498,27 @@ class PartyManager:
             )
 
             # Update skin selection
-            if skin and self._skin_collector:
+            if isinstance(skin, dict) and self._skin_collector:
                 try:
                     sel = SkinSelection(
                         summoner_id=sid,
                         summoner_name=name,
-                        champion_id=skin.get("champion_id", 0),
-                        skin_id=skin.get("skin_id", 0),
+                        champion_id=int(skin.get("champion_id", 0)),
+                        skin_id=int(skin.get("skin_id", 0)),
                         chroma_id=skin.get("chroma_id"),
                     )
+                    if sel.champion_id <= 0 or sel.skin_id <= 0:
+                        raise ValueError("invalid relay skin payload")
                     self.party_state.update_peer_skin(sid, sel)
                     self._skin_collector.update_from_peer(sel)
                 except Exception as e:
                     log.debug(f"[PARTY] Failed to update peer skin: {e}")
+                    self.party_state.clear_peer_skin(sid)
+                    self._skin_collector.clear_peer(sid)
+            else:
+                self.party_state.clear_peer_skin(sid)
+                if self._skin_collector:
+                    self._skin_collector.clear_peer(sid)
 
         # Remove peers that are no longer in the room
         stale = [
@@ -535,7 +612,7 @@ class PartyManager:
                     if old_relay and old_relay is not candidate:
                         await old_relay.disconnect()
 
-                await self.broadcast_skin_update()
+                await self.broadcast_skin_update(force=True)
                 log.info("[PARTY] Relay connection restored")
                 self._notify_state_change()
                 return
@@ -554,6 +631,11 @@ class PartyManager:
                     continue
 
                 lobby_ids = self._lobby_matcher.get_all_summoner_ids()
+                team_champions = (
+                    self._lobby_matcher.get_team_champion_mapping()
+                )
+                if team_champions:
+                    self._team_champions = team_champions
                 for sid in self.party_state.get_peer_ids():
                     in_lobby = sid in lobby_ids
                     self.party_state.update_peer_lobby_status(sid, in_lobby)
@@ -565,29 +647,12 @@ class PartyManager:
 
     async def _skin_broadcast_loop(self):
         """Broadcast skin updates when selection changes."""
-        last_skin_id = None
-        last_chroma_id = None
-        last_custom_mod = None
-
         while self._running:
             try:
                 await asyncio.sleep(SKIN_BROADCAST_INTERVAL)
                 if not self._running:
                     continue
-
-                current_skin_id = self.state.last_hovered_skin_id
-                current_chroma_id = getattr(self.state, "selected_chroma_id", None)
-                current_custom_mod = getattr(self.state, "selected_custom_mod", None)
-                # Track custom mod by its path to detect changes
-                custom_mod_key = current_custom_mod.get("relative_path") if current_custom_mod else None
-
-                if (current_skin_id != last_skin_id or
-                    current_chroma_id != last_chroma_id or
-                    custom_mod_key != last_custom_mod):
-                    last_skin_id = current_skin_id
-                    last_chroma_id = current_chroma_id
-                    last_custom_mod = custom_mod_key
-                    await self.broadcast_skin_update()
+                await self.broadcast_skin_update()
 
             except asyncio.CancelledError:
                 break

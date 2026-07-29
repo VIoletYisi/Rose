@@ -73,7 +73,7 @@ class SkinCollector:
     def get_my_selection(
         self, summoner_id: int, summoner_name: str
     ) -> Optional[SkinSelection]:
-        """Get our own skin selection from state
+        """Return the skin that Rose will actually inject for this game.
 
         Args:
             summoner_id: Our summoner ID
@@ -82,19 +82,65 @@ class SkinCollector:
         Returns:
             Our skin selection or None
         """
-        champion_id = self.state.locked_champ_id or self.state.hovered_champ_id
-        skin_id = self.state.last_hovered_skin_id
-
-        if not champion_id or not skin_id:
+        champion_id = self._positive_int(
+            getattr(self.state, "locked_champ_id", None)
+            or getattr(self.state, "hovered_champ_id", None)
+        )
+        if champion_id is None:
             return None
 
-        chroma_id = getattr(self.state, "selected_chroma_id", None)
-
-        # Check for custom mod
+        # Custom mods take precedence over the normal, random and historic
+        # selection paths. Only advertise a mod selected for this champion.
         custom_mod_path = None
         selected_custom_mod = getattr(self.state, "selected_custom_mod", None)
-        if selected_custom_mod and selected_custom_mod.get("skin_id") == skin_id:
-            custom_mod_path = selected_custom_mod.get("relative_path")
+        if isinstance(selected_custom_mod, dict):
+            custom_champion = self._positive_int(
+                selected_custom_mod.get("champion_id")
+            )
+            if custom_champion == champion_id:
+                custom_mod_path = selected_custom_mod.get("relative_path")
+                skin_id = self._positive_int(
+                    selected_custom_mod.get("skin_id")
+                    or selected_custom_mod.get("storage_skin_id")
+                )
+                if custom_mod_path and skin_id is not None:
+                    return SkinSelection(
+                        summoner_id=summoner_id,
+                        summoner_name=summoner_name,
+                        champion_id=champion_id,
+                        skin_id=skin_id,
+                        chroma_id=self._positive_int(
+                            getattr(self.state, "selected_chroma_id", None)
+                        ),
+                        custom_mod_path=str(custom_mod_path),
+                    )
+
+        # Historic and Random modes override the skin detected from the
+        # client's carousel. Their IDs were previously never sent to Party.
+        skin_id = None
+        if getattr(self.state, "historic_mode_active", False):
+            historic_value = getattr(self.state, "historic_skin_id", None)
+            skin_id = self._positive_int(historic_value)
+            if skin_id is None and isinstance(historic_value, str):
+                custom_mod_path = self._historic_custom_mod_path(historic_value)
+                skin_id = self._skin_id_from_mod_path(custom_mod_path)
+        elif getattr(self.state, "random_mode_active", False):
+            skin_id = self._positive_int(
+                getattr(self.state, "random_skin_id", None)
+            )
+
+        if skin_id is None:
+            skin_id = self._positive_int(
+                getattr(self.state, "last_hovered_skin_id", None)
+                or getattr(self.state, "selected_skin_id", None)
+            )
+
+        if skin_id is None:
+            return None
+
+        chroma_id = self._positive_int(
+            getattr(self.state, "selected_chroma_id", None)
+        )
 
         return SkinSelection(
             summoner_id=summoner_id,
@@ -104,6 +150,39 @@ class SkinCollector:
             chroma_id=chroma_id,
             custom_mod_path=custom_mod_path,
         )
+
+    @staticmethod
+    def _positive_int(value) -> Optional[int]:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _historic_custom_mod_path(value: str) -> Optional[str]:
+        """Decode the path marker used by Rose's historic custom-mod mode."""
+        try:
+            from utils.core.historic import get_custom_mod_path, is_custom_mod_path
+
+            if is_custom_mod_path(value):
+                return get_custom_mod_path(value)
+        except Exception:
+            return None
+        return None
+
+    @classmethod
+    def _skin_id_from_mod_path(cls, value: Optional[str]) -> Optional[int]:
+        if not value:
+            return None
+        parts = str(value).replace("\\", "/").split("/")
+        try:
+            skins_index = parts.index("skins")
+        except ValueError:
+            return None
+        if skins_index + 1 >= len(parts):
+            return None
+        return cls._positive_int(parts[skins_index + 1])
 
     def collect_all_skins(
         self,
@@ -197,30 +276,45 @@ class SkinCollector:
             List of PartySkinData for party members
         """
         skins = []
+        seen_summoner_ids = set()
+        my_id = self._positive_int(my_summoner_id)
 
         for member in members:
-            sid = member.get("summoner_id", 0)
-            if sid == my_summoner_id or not sid:
+            if not isinstance(member, dict):
                 continue
+            sid = self._positive_int(member.get("summoner_id"))
+            if sid is None or sid == my_id or sid in seen_summoner_ids:
+                continue
+            seen_summoner_ids.add(sid)
 
             skin = member.get("skin")
-            if not skin:
-                # Try cached selection
-                cached = self._selections.get(sid)
-                if cached:
-                    skin = {
-                        "champion_id": cached.champion_id,
-                        "skin_id": cached.skin_id,
-                        "chroma_id": cached.chroma_id,
-                    }
-
-            if not skin or not skin.get("skin_id"):
+            if not isinstance(skin, dict):
                 continue
 
-            champion_id = skin.get("champion_id", 0)
+            champion_id = self._positive_int(skin.get("champion_id"))
+            skin_id = self._positive_int(skin.get("skin_id"))
+            if champion_id is None or skin_id is None:
+                continue
+
+            # Relay membership alone is not enough: a room can contain people
+            # who are not in this match. Require an exact current-team match.
             expected = team_champions.get(sid)
-            if expected and expected != champion_id:
-                log.warning(f"[SKIN_COLLECT] Champion mismatch for {sid}")
+            if expected is None:
+                log.debug(
+                    f"[SKIN_COLLECT] Ignoring relay member {sid}: not on current team"
+                )
+                continue
+            if int(expected) != champion_id:
+                log.warning(
+                    f"[SKIN_COLLECT] Champion mismatch for {sid}: "
+                    f"expected {expected}, got {champion_id}"
+                )
+                continue
+            if not self._skin_matches_champion(skin_id, champion_id):
+                log.warning(
+                    f"[SKIN_COLLECT] Skin {skin_id} does not belong to "
+                    f"champion {champion_id}; ignoring relay member {sid}"
+                )
                 continue
 
             # For custom mods, try to find a local match by content hash
@@ -241,14 +335,30 @@ class SkinCollector:
                 summoner_id=sid,
                 summoner_name=member.get("summoner_name", "Unknown"),
                 champion_id=champion_id,
-                skin_id=skin.get("skin_id", 0),
-                chroma_id=skin.get("chroma_id"),
+                skin_id=skin_id,
+                chroma_id=self._positive_int(skin.get("chroma_id")),
                 custom_mod_path=custom_mod_path,
                 is_local=False,
             ))
 
         log.info(f"[SKIN_COLLECT] Collected {len(skins)} relay skin selections")
         return skins
+
+    @staticmethod
+    def _skin_matches_champion(skin_id: int, champion_id: int) -> bool:
+        """Validate regular skins and Rose's special form/chroma identifiers."""
+        if skin_id // 1000 == champion_id:
+            return True
+        try:
+            from utils.core.utilities import get_base_skin_id_for_chroma
+
+            base_skin_id = get_base_skin_id_for_chroma(skin_id, None)
+            return bool(
+                base_skin_id
+                and int(base_skin_id) // 1000 == champion_id
+            )
+        except Exception:
+            return False
 
     def get_peer_selections(self) -> Dict[int, SkinSelection]:
         """Get all cached peer selections
