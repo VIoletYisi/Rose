@@ -10,6 +10,7 @@ on:
       - "Rose.spec"
       - "scripts/**"
       - "vendor/**"
+      - "Pengu Loader/plugins/ROSE-PartyMode/**"
       - ".github/workflows/build-windows.yml"
 
 jobs:
@@ -45,12 +46,17 @@ jobs:
               throw "ROSE_RELAY_URL secret is not configured."
           }
 
-          python -c "import os; from pathlib import Path; u=os.environ['ROSE_RELAY_URL'].strip(); assert u.startswith('wss://'); Path('party/network/relay_config.py').write_text('RELAY_URL = ' + repr(u) + '\n', encoding='utf-8')"
+          python -c "import os; from pathlib import Path; u=os.environ['ROSE_RELAY_URL'].strip().rstrip('/'); assert u.startswith('wss://'); Path('party/network/relay_config.py').write_text('RELAY_URL = ' + repr(u) + '\n', encoding='utf-8')"
 
       - name: Verify Party relay configuration
         shell: pwsh
         run: |
           python -c "from party.network.ws_relay import RELAY_URL; assert RELAY_URL.startswith('wss://'); print('Party relay configuration embedded successfully.')"
+
+      - name: Run Party Mode tests
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -t . -p "test_*.py"
 
       - name: Build Rose
         shell: pwsh

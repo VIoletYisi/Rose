@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Party Mode Network - P2P networking components
-"""
+"""Party Mode relay networking."""
 
-from .stun_client import StunClient
-from .udp_transport import UDPTransport
-from .peer_connection import PeerConnection
+from .ws_relay import PartyRelay, compute_room_key
 
-__all__ = ["StunClient", "UDPTransport", "PeerConnection"]
+__all__ = ["PartyRelay", "compute_room_key"]

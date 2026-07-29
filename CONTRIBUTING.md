@@ -221,10 +221,7 @@ Rose/
 │   │   ├── party_manager.py  # Main party mode orchestrator
 │   │   └── party_state.py
 │   ├── network/            # Networking layer
-│   │   ├── ws_relay.py     # WebSocket relay client
-│   │   ├── peer_connection.py
-│   │   ├── stun_client.py
-│   │   └── udp_transport.py
+│   │   └── ws_relay.py     # WebSocket relay client
 │   ├── protocol/           # Wire protocol
 │   │   ├── crypto.py       # XOR cipher with dynamic keys
 │   │   ├── message_types.py
@@ -233,8 +230,7 @@ Rose/
 │   │   ├── lobby_matcher.py
 │   │   └── skin_collector.py
 │   └── integration/        # UI and injection hooks
-│       ├── injection_hook.py
-│       └── ui_bridge.py
+│       └── injection_hook.py
 │
 ├── relay-worker/           # Cloudflare Worker — party relay
 │   ├── src/

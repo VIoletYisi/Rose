@@ -12,7 +12,6 @@ from state import SharedState
 from utils.core.logging import get_logger
 
 from ..protocol.message_types import SkinSelection
-from ..network.peer_connection import PeerConnection
 
 log = get_logger()
 
@@ -194,81 +193,6 @@ class SkinCollector:
         if skins_index + 1 >= len(parts):
             return None
         return cls._positive_int(parts[skins_index + 1])
-
-    def collect_all_skins(
-        self,
-        peers: List[PeerConnection],
-        my_summoner_id: int,
-        my_summoner_name: str,
-        team_champions: Dict[int, int],
-    ) -> List[PartySkinData]:
-        """Collect all skin selections for injection
-
-        Args:
-            peers: List of connected peers in lobby
-            my_summoner_id: Our summoner ID
-            my_summoner_name: Our summoner name
-            team_champions: Mapping of summoner_id -> champion_id
-
-        Returns:
-            List of PartySkinData for all party members
-        """
-        skins = []
-
-        # Add our own selection first
-        my_selection = self.get_my_selection(my_summoner_id, my_summoner_name)
-        if my_selection:
-            skins.append(
-                PartySkinData(
-                    summoner_id=my_summoner_id,
-                    summoner_name=my_summoner_name,
-                    champion_id=my_selection.champion_id,
-                    skin_id=my_selection.skin_id,
-                    chroma_id=my_selection.chroma_id,
-                    custom_mod_path=my_selection.custom_mod_path,
-                    is_local=True,
-                )
-            )
-
-        # Add peer selections (require connected; in_lobby may be cleared at injection time when phase changes)
-        for peer in peers:
-            if not peer.is_connected:
-                continue
-
-            selection = peer.skin_selection
-            if not selection:
-                # Use cached selection
-                selection = self._selections.get(peer.summoner_id)
-
-            if selection:
-                # Verify champion matches team champion
-                expected_champion = team_champions.get(selection.summoner_id)
-                if expected_champion and expected_champion != selection.champion_id:
-                    log.warning(
-                        f"[SKIN_COLLECT] Champion mismatch for {selection.summoner_name}: "
-                        f"expected {expected_champion}, got {selection.champion_id}"
-                    )
-                    continue
-
-                skins.append(
-                    PartySkinData(
-                        summoner_id=selection.summoner_id,
-                        summoner_name=selection.summoner_name,
-                        champion_id=selection.champion_id,
-                        skin_id=selection.skin_id,
-                        chroma_id=selection.chroma_id,
-                        custom_mod_path=selection.custom_mod_path,
-                        is_local=False,
-                    )
-                )
-
-        log.info(
-            f"[SKIN_COLLECT] Collected {len(skins)} skin selections "
-            f"({sum(1 for s in skins if s.is_local)} local, "
-            f"{sum(1 for s in skins if not s.is_local)} from peers)"
-        )
-
-        return skins
 
     def collect_relay_skins(
         self,

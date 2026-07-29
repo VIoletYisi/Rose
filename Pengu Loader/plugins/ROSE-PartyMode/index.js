@@ -1,7 +1,7 @@
 /**
  * @name Rose-PartyMode
  * @author Rose Team
- * @description Party Mode - See your friends' skins in game via P2P
+ * @description Party Mode - Share teammate skin selections through the Rose relay
  * @link https://github.com/Alban1911/Rose
  */
 (function initPartyMode() {
@@ -27,6 +27,10 @@
   // Party state
   let partyState = {
     enabled: false,
+    relay_status: "offline",
+    room_role: "none",
+    host_summoner_id: null,
+    last_error: null,
     my_token: null,
     my_summoner_id: null,
     my_summoner_name: "Unknown",
@@ -202,6 +206,9 @@
 
     .party-status.offline { color: #5b5a56; }
     .party-status.online  { color: #0acbe6; }
+    .party-status.connecting,
+    .party-status.reconnecting { color: #c89b3c; }
+    .party-status.error { color: #ff4646; }
 
     /* Body — matches .lol-friend-finder-modal .modal-body */
     .party-content {
@@ -414,18 +421,6 @@
       color: #c89b3c;
       line-height: 14px;
     }
-
-    .peer-remove {
-      background: none;
-      border: none;
-      color: #5b5a56;
-      cursor: pointer;
-      padding: 4px 8px;
-      font-size: 14px;
-      transition: color .2s;
-    }
-
-    .peer-remove:hover { color: #ff4646; }
 
     .no-peers {
       color: #5b5a56;
@@ -657,7 +652,11 @@
     } else {
       lobbyButton.classList.remove("active");
     }
-    if (partyState.enabled && connectedPeers.length > 0) {
+    if (
+      partyState.enabled &&
+      partyState.relay_status === "online" &&
+      connectedPeers.length > 0
+    ) {
       lobbyButton.classList.add("connected");
     } else {
       lobbyButton.classList.remove("connected");
@@ -683,16 +682,17 @@
         <span class="party-status offline">Offline</span>
       </div>
       <div class="party-content">
-        <div class="party-description">Share your skins with friends in the same lobby. Enable party mode and exchange tokens to connect.</div>
+        <div class="party-description">Join the same Rose relay room, then enter champion select together. Only teammates in your current game are included.</div>
 
         <div class="party-section" id="party-toggle-section">
           <button class="party-toggle-btn enable" id="party-toggle-btn">
             Enable Party Mode
           </button>
+          <div id="party-status-message"></div>
         </div>
 
         <div class="party-section" id="party-token-section" style="display: none;">
-          <div class="party-section-title">Your Party Token</div>
+          <div class="party-section-title">Party Invite Token</div>
           <div class="token-container">
             <input type="text" class="token-input" id="party-token-display" readonly placeholder="Generating...">
             <button class="copy-btn" id="copy-token-btn">Copy</button>
@@ -700,18 +700,18 @@
         </div>
 
         <div class="party-section" id="party-add-section" style="display: none;">
-          <div class="party-section-title">Add Friend</div>
+          <div class="party-section-title">Join a Party</div>
           <div class="add-peer-container">
-            <input type="text" class="add-peer-input" id="add-peer-input" placeholder="Paste friend's token here...">
-            <button class="add-btn" id="add-peer-btn">Add</button>
+            <input type="text" class="add-peer-input" id="add-peer-input" placeholder="Paste the host's token here...">
+            <button class="add-btn" id="add-peer-btn">Join</button>
           </div>
           <div id="add-peer-message"></div>
         </div>
 
         <div class="party-section" id="party-peers-section" style="display: none;">
-          <div class="party-section-title">Connected Friends (<span id="peer-count">0</span>)</div>
+          <div class="party-section-title">Room Members (<span id="peer-count">0</span>)</div>
           <div class="peers-list" id="peers-list">
-            <div class="no-peers">No friends connected yet</div>
+            <div class="no-peers">No other room members yet</div>
           </div>
         </div>
       </div>
@@ -766,10 +766,26 @@
     const tokenDisplay = document.getElementById("party-token-display");
     const peerCountEl = document.getElementById("peer-count");
     const peersList = document.getElementById("peers-list");
+    const statusMessage = document.getElementById("party-status-message");
+
+    if (statusMessage) {
+      statusMessage.innerHTML = partyState.last_error
+        ? `<div class="error-msg">${escapeHtml(partyState.last_error)}</div>`
+        : "";
+    }
 
     if (partyState.enabled) {
-      statusEl.className = "party-status online";
-      statusEl.textContent = "Online";
+      const relayStatus = partyState.relay_status || "connecting";
+      const relayLabels = {
+        online: "Online",
+        connecting: "Connecting",
+        reconnecting: "Reconnecting",
+        error: "Error",
+        offline: "Offline",
+      };
+      statusEl.className = `party-status ${relayStatus}`;
+      statusEl.textContent = relayLabels[relayStatus] || relayStatus;
+      statusEl.title = partyState.last_error || "";
 
       toggleBtn.className = "party-toggle-btn disable";
       toggleBtn.textContent = "Disable Party Mode";
@@ -788,7 +804,7 @@
       peerCountEl.textContent = connectedPeers.length;
 
       if (allPeers.length === 0) {
-        peersList.innerHTML = '<div class="no-peers">No friends connected yet</div>';
+        peersList.innerHTML = '<div class="no-peers">No other room members yet</div>';
       } else {
         peersList.innerHTML = allPeers
           .map((peer) => {
@@ -817,19 +833,18 @@
                 ${escapeHtml(statusText)}</span>
                 ${skinInfo ? `<span class="peer-skin">${skinInfo}</span>` : ""}
               </div>
-              <button class="peer-remove" title="Remove" onclick="window.rosePartyRemovePeer(${peer.summoner_id})">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
-                </svg>
-              </button>
             </div>
           `;
           })
           .join("");
       }
     } else {
-      statusEl.className = "party-status offline";
-      statusEl.textContent = "Offline";
+      const inactiveStatus =
+        partyState.relay_status === "error" ? "error" : "offline";
+      statusEl.className = `party-status ${inactiveStatus}`;
+      statusEl.textContent =
+        inactiveStatus === "error" ? "Error" : "Offline";
+      statusEl.title = partyState.last_error || "";
 
       toggleBtn.className = "party-toggle-btn enable";
       toggleBtn.textContent = "Enable Party Mode";
@@ -901,11 +916,6 @@
     input.value = "";
   }
 
-  // Global function for remove button onclick
-  window.rosePartyRemovePeer = function (summonerId) {
-    sendBridgeMessage({ type: "party-remove-peer", summoner_id: summonerId });
-  };
-
   function handleBridgeMessage(data) {
     console.log(`${LOG_PREFIX} Received:`, data.type);
 
@@ -913,6 +923,10 @@
       case "party-state":
         partyState = {
           enabled: data.enabled || false,
+          relay_status: data.relay_status || "offline",
+          room_role: data.room_role || "none",
+          host_summoner_id: data.host_summoner_id || null,
+          last_error: data.last_error || null,
           my_token: data.my_token || null,
           my_summoner_id: data.my_summoner_id || null,
           my_summoner_name: data.my_summoner_name || "Unknown",
@@ -924,13 +938,24 @@
 
       case "party-enabled":
         const toggleBtn = document.getElementById("party-toggle-btn");
-        toggleBtn.disabled = false;
+        if (toggleBtn) toggleBtn.disabled = false;
 
         if (data.success) {
           partyState.enabled = true;
-          partyState.my_token = data.token;
+          partyState.relay_status = data.relay_status || "online";
+          partyState.room_role = data.room_role || "host";
+          partyState.host_summoner_id = data.host_summoner_id || null;
+          partyState.last_error = null;
+          partyState.my_token = data.my_token || data.token;
+          partyState.my_summoner_id =
+            data.my_summoner_id || partyState.my_summoner_id;
+          partyState.my_summoner_name =
+            data.my_summoner_name || partyState.my_summoner_name;
           console.log(`${LOG_PREFIX} Party mode enabled`);
         } else {
+          partyState.enabled = false;
+          partyState.relay_status = "error";
+          partyState.last_error = data.error || "Failed to enable";
           const messageEl = document.getElementById("add-peer-message");
           if (messageEl) {
             messageEl.innerHTML = `<div class="error-msg">${escapeHtml(data.error || "Failed to enable")}</div>`;
@@ -945,10 +970,19 @@
         const toggleBtnDisable = document.getElementById("party-toggle-btn");
         if (toggleBtnDisable) toggleBtnDisable.disabled = false;
 
-        partyState.enabled = false;
-        partyState.my_token = null;
-        partyState.peers = [];
-        console.log(`${LOG_PREFIX} Party mode disabled`);
+        if (data.success !== false) {
+          partyState.enabled = false;
+          partyState.relay_status = "offline";
+          partyState.room_role = "none";
+          partyState.host_summoner_id = null;
+          partyState.last_error = null;
+          partyState.my_token = null;
+          partyState.peers = [];
+          console.log(`${LOG_PREFIX} Party mode disabled`);
+        } else {
+          partyState.last_error = data.error || "Failed to disable";
+          console.error(`${LOG_PREFIX} Failed to disable:`, data.error);
+        }
         updateButtonState();
         updatePanelState();
         break;
@@ -962,7 +996,7 @@
         if (addInput) addInput.disabled = false;
         if (addBtn) {
           addBtn.disabled = false;
-          addBtn.textContent = "Add";
+          addBtn.textContent = "Join";
         }
         const unlockToggleBtn = document.getElementById("party-toggle-btn");
         if (unlockToggleBtn) unlockToggleBtn.disabled = false;
@@ -972,7 +1006,7 @@
         if (data.success) {
           if (addMessageEl) {
             addMessageEl.innerHTML =
-              '<div class="success-msg">Friend connected!</div>';
+              '<div class="success-msg">Party joined!</div>';
             setTimeout(() => {
               addMessageEl.innerHTML = "";
             }, 3000);
@@ -986,11 +1020,6 @@
         sendBridgeMessage({ type: "party-get-state" });
         break;
       }
-
-      case "party-peer-removed":
-        // Request updated state
-        sendBridgeMessage({ type: "party-get-state" });
-        break;
 
       case "phase-change":
         // Pause the 500ms DOM monitor during in-game to avoid stealing

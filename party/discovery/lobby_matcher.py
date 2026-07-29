@@ -11,8 +11,6 @@ from lcu import LCU
 from state import SharedState
 from utils.core.logging import get_logger
 
-from ..network.peer_connection import PeerConnection
-
 log = get_logger()
 
 
@@ -145,36 +143,6 @@ class LobbyMatcher:
             log.debug(f"[LOBBY] Error getting own summoner name: {e}")
 
         return "Unknown"
-
-    def match_peers_to_lobby(
-        self, peers: List[PeerConnection]
-    ) -> Dict[int, PeerConnection]:
-        """Match connected peers to lobby members
-
-        Args:
-            peers: List of connected peer connections
-
-        Returns:
-            Dict mapping summoner_id to PeerConnection for peers in lobby
-        """
-        lobby_ids = self.get_all_summoner_ids()
-
-        if not lobby_ids:
-            log.debug("[LOBBY] No lobby members found")
-            return {}
-
-        matched = {}
-        for peer in peers:
-            if peer.is_connected and peer.summoner_id in lobby_ids:
-                matched[peer.summoner_id] = peer
-                peer.peer_info.in_lobby = True
-            else:
-                peer.peer_info.in_lobby = False
-
-        if matched:
-            log.info(f"[LOBBY] Matched {len(matched)} peers to lobby members")
-
-        return matched
 
     def get_team_champion_mapping(self) -> Dict[int, int]:
         """Get mapping of summoner ID to champion ID for our team

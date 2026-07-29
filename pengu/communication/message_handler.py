@@ -2687,6 +2687,7 @@ class MessageHandler:
                     response_payload = {
                         "type": "party-enabled",
                         "success": True,
+                        **party_manager.get_state_dict(),
                         "token": token,
                     }
                     self._send_response(json.dumps(response_payload))
@@ -2696,6 +2697,7 @@ class MessageHandler:
                     response_payload = {
                         "type": "party-enabled",
                         "success": False,
+                        "relay_status": "error",
                         "error": str(e),
                     }
                     self._send_response(json.dumps(response_payload))
@@ -2705,6 +2707,12 @@ class MessageHandler:
                 asyncio.run_coroutine_threadsafe(do_enable(), self.websocket_server.loop)
             else:
                 log.warning("[PARTY] No event loop available")
+                self._send_response(json.dumps({
+                    "type": "party-enabled",
+                    "success": False,
+                    "relay_status": "error",
+                    "error": "Party event loop is not available",
+                }))
 
         except Exception as e:
             log.error(f"[PARTY] Error handling party enable: {e}")
@@ -2737,6 +2745,7 @@ class MessageHandler:
                     response_payload = {
                         "type": "party-disabled",
                         "success": True,
+                        "relay_status": "offline",
                     }
                     self._send_response(json.dumps(response_payload))
                     log.info("[PARTY] Party mode disabled")
@@ -2751,6 +2760,12 @@ class MessageHandler:
 
             if self.websocket_server and self.websocket_server.loop:
                 asyncio.run_coroutine_threadsafe(do_disable(), self.websocket_server.loop)
+            else:
+                self._send_response(json.dumps({
+                    "type": "party-disabled",
+                    "success": False,
+                    "error": "Party event loop is not available",
+                }))
 
         except Exception as e:
             log.error(f"[PARTY] Error handling party disable: {e}")
@@ -2804,41 +2819,24 @@ class MessageHandler:
 
             if self.websocket_server and self.websocket_server.loop:
                 asyncio.run_coroutine_threadsafe(do_add_peer(), self.websocket_server.loop)
+            else:
+                self._send_response(json.dumps({
+                    "type": "party-peer-added",
+                    "success": False,
+                    "error": "Party event loop is not available",
+                }))
 
         except Exception as e:
             log.error(f"[PARTY] Error handling add peer: {e}")
 
     def _handle_party_remove_peer(self, payload: dict) -> None:
-        """Handle remove peer request"""
-        try:
-            summoner_id = payload.get("summoner_id")
-            if not summoner_id:
-                return
-
-            party_manager = getattr(self.shared_state, 'party_manager', None)
-            if not party_manager:
-                return
-
-            import asyncio
-
-            async def do_remove_peer():
-                try:
-                    await party_manager.remove_peer(int(summoner_id))
-                    response_payload = {
-                        "type": "party-peer-removed",
-                        "success": True,
-                        "summoner_id": summoner_id,
-                    }
-                    self._send_response(json.dumps(response_payload))
-                    log.info(f"[PARTY] Peer {summoner_id} removed")
-                except Exception as e:
-                    log.error(f"[PARTY] Failed to remove peer: {e}")
-
-            if self.websocket_server and self.websocket_server.loop:
-                asyncio.run_coroutine_threadsafe(do_remove_peer(), self.websocket_server.loop)
-
-        except Exception as e:
-            log.error(f"[PARTY] Error handling remove peer: {e}")
+        """The shared relay protocol has no per-member kick operation."""
+        self._send_response(json.dumps({
+            "type": "party-peer-removed",
+            "success": False,
+            "summoner_id": payload.get("summoner_id"),
+            "error": "The shared Party relay does not support kicking members",
+        }))
 
     def _handle_party_get_state(self, payload: dict) -> None:
         """Handle get party state request"""
@@ -2848,6 +2846,10 @@ class MessageHandler:
                 response_payload = {
                     "type": "party-state",
                     "enabled": False,
+                    "relay_status": "offline",
+                    "room_role": "none",
+                    "host_summoner_id": None,
+                    "last_error": None,
                     "my_token": None,
                     "peers": [],
                     "timestamp": int(time.time() * 1000),

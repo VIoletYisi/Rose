@@ -294,7 +294,6 @@ hiddenimports = [
     'party.core.party_manager',
     'party.core.party_state',
     'party.network',
-    'party.network.peer_connection',
     'party.network.ws_relay',
     'party.protocol',
     'party.protocol.message_types',

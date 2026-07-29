@@ -331,6 +331,10 @@ class Broadcaster:
             payload = {
                 "type": "party-state",
                 "enabled": False,
+                "relay_status": "offline",
+                "room_role": "none",
+                "host_summoner_id": None,
+                "last_error": None,
                 "my_token": None,
                 "peers": [],
                 "timestamp": int(time.time() * 1000),
@@ -398,4 +402,3 @@ class Broadcaster:
                 return False
         
         return False
-
