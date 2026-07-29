@@ -7,7 +7,6 @@ Orchestrator for party mode skin sharing via WebSocket relay.
 
 import asyncio
 import secrets
-import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 from lcu import LCU
@@ -25,6 +24,10 @@ log = get_logger()
 
 LOBBY_CHECK_INTERVAL = 2.0
 SKIN_BROADCAST_INTERVAL = 1.0
+MEMBER_CONFIRM_TIMEOUT = 10.0
+RECONNECT_DELAYS = (1.0, 2.0, 4.0, 8.0, 15.0)
+TOKEN_REFRESH_CHECK_INTERVAL = 300.0
+TOKEN_REFRESH_THRESHOLD = 600
 
 
 class PartyManager:
@@ -41,6 +44,12 @@ class PartyManager:
         self._my_key: Optional[bytes] = None
         self._my_token: Optional[PartyToken] = None
         self._relay: Optional[PartyRelay] = None
+        self._active_room_key: Optional[str] = None
+        self._active_invite_token: Optional[str] = None
+        self._host_summoner_id: Optional[int] = None
+        self._room_role = "none"
+        self._relay_lock = asyncio.Lock()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Discovery
         self._lobby_matcher: Optional[LobbyMatcher] = None
@@ -50,6 +59,8 @@ class PartyManager:
         self._running = False
         self._lobby_check_task: Optional[asyncio.Task] = None
         self._skin_broadcast_task: Optional[asyncio.Task] = None
+        self._reconnect_task: Optional[asyncio.Task] = None
+        self._token_refresh_task: Optional[asyncio.Task] = None
 
         # Callbacks for UI updates
         self._on_state_change: Optional[Callable[[PartyState], None]] = None
@@ -77,8 +88,10 @@ class PartyManager:
             return self.party_state.my_token or ""
 
         log.info("[PARTY] Enabling party mode...")
+        relay: Optional[PartyRelay] = None
 
         try:
+            self._loop = asyncio.get_running_loop()
             self._lobby_matcher = LobbyMatcher(self.lcu, self.state)
             self._skin_collector = SkinCollector(self.state)
 
@@ -99,32 +112,63 @@ class PartyManager:
             )
 
             token_str = self._my_token.encode()
+
+            room_key = compute_room_key(my_summoner_id, self._my_key)
+            self.party_state.set_connection_status("connecting")
+            self._notify_state_change()
+
+            relay = self._create_relay(room_key)
+            if not await relay.connect():
+                raise RuntimeError("Failed to connect to relay")
+            if not await relay.join(my_summoner_id, my_summoner_name):
+                raise RuntimeError("Failed to announce this account to relay")
+            if not await relay.wait_for_member(
+                my_summoner_id,
+                timeout=MEMBER_CONFIRM_TIMEOUT,
+            ):
+                raise RuntimeError("Relay did not confirm this account")
+
+            self._relay = relay
+            self._active_room_key = room_key
+            self._active_invite_token = token_str
+            self._host_summoner_id = my_summoner_id
+            self._room_role = "host"
+
             self.party_state.my_token = token_str
             self.party_state.enabled = True
-
-            # Connect to relay room
-            room_key = compute_room_key(my_summoner_id, self._my_key)
-            self._relay = PartyRelay(room_key)
-            self._relay.set_on_members_changed(self._on_relay_members_changed)
-
-            if await self._relay.connect():
-                await self._relay.join(my_summoner_id, my_summoner_name)
-                log.info(f"[PARTY] Connected to relay room {room_key[:8]}...")
-            else:
-                log.warning("[PARTY] Relay connection failed, party mode limited")
+            self.party_state.room_role = self._room_role
+            self.party_state.host_summoner_id = self._host_summoner_id
+            self.party_state.set_connection_status("online")
+            self._sync_relay_members(relay, relay.get_members_snapshot())
+            log.info(f"[PARTY] Connected to relay room {room_key[:8]}...")
 
             # Start background tasks
             self._running = True
             self._lobby_check_task = asyncio.create_task(self._lobby_check_loop())
             self._skin_broadcast_task = asyncio.create_task(self._skin_broadcast_loop())
+            self._token_refresh_task = asyncio.create_task(
+                self._token_refresh_loop()
+            )
 
-            log.info(f"[PARTY] Party mode enabled. Token: {token_str[:20]}...")
+            log.info("[PARTY] Party mode enabled")
             self._notify_state_change()
             return token_str
 
         except Exception as e:
             log.error(f"[PARTY] Failed to enable party mode: {e}")
-            await self.disable()
+            self._running = False
+            if relay:
+                await relay.disconnect()
+            self._relay = None
+            self._active_room_key = None
+            self._active_invite_token = None
+            self._host_summoner_id = None
+            self._room_role = "none"
+            self._my_key = None
+            self._my_token = None
+            self.party_state.clear_all()
+            self.party_state.set_connection_status("error", error=str(e))
+            self._notify_state_change()
             raise RuntimeError(f"Failed to enable party mode: {e}")
 
     async def disable(self):
@@ -132,24 +176,41 @@ class PartyManager:
         log.info("[PARTY] Disabling party mode...")
         self._running = False
 
-        for task in [self._lobby_check_task, self._skin_broadcast_task]:
-            if task:
+        current_task = asyncio.current_task()
+        tasks = [
+            self._lobby_check_task,
+            self._skin_broadcast_task,
+            self._reconnect_task,
+            self._token_refresh_task,
+        ]
+        for task in tasks:
+            if task and task is not current_task:
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+                except Exception:
+                    pass
 
         self._lobby_check_task = None
         self._skin_broadcast_task = None
+        self._reconnect_task = None
+        self._token_refresh_task = None
 
-        if self._relay:
-            await self._relay.disconnect()
-            self._relay = None
+        async with self._relay_lock:
+            if self._relay:
+                await self._relay.disconnect()
+                self._relay = None
 
         self.party_state.clear_all()
         self._my_key = None
         self._my_token = None
+        self._active_room_key = None
+        self._active_invite_token = None
+        self._host_summoner_id = None
+        self._room_role = "none"
+        self._loop = None
 
         log.info("[PARTY] Party mode disabled")
         self._notify_state_change()
@@ -168,36 +229,80 @@ class PartyManager:
             if token.summoner_id == self.party_state.my_summoner_id:
                 return False, "You cannot add yourself"
 
-            # Check if peer is already in our room (they joined us)
-            if self._relay and self._relay.connected:
-                for member in self._relay.members:
-                    if member.get("summoner_id") == token.summoner_id:
-                        log.info(f"[PARTY] Peer {token.summoner_id} is already in our room")
-                        return True, None
-
-            # Check if we're already in the target room
             target_room_key = compute_room_key(token.summoner_id, token.encryption_key)
-            if self._relay and self._relay.room_key == target_room_key:
-                log.info(f"[PARTY] Already in peer's room")
+
+            async with self._relay_lock:
+                current_relay = self._relay
+
+                if (
+                    current_relay
+                    and current_relay.room_key == target_room_key
+                    and current_relay.connected
+                ):
+                    if await current_relay.wait_for_member(
+                        token.summoner_id,
+                        timeout=MEMBER_CONFIRM_TIMEOUT,
+                    ):
+                        log.info("[PARTY] Already in requested party room")
+                        return True, None
+                    return False, "Party host is not online"
+
+                if current_relay and current_relay.get_members_snapshot():
+                    peer_ids = {
+                        self._member_summoner_id(member)
+                        for member in current_relay.get_members_snapshot()
+                    }
+                    peer_ids.discard(self.party_state.my_summoner_id or 0)
+                    if peer_ids:
+                        return (
+                            False,
+                            "Already in a party. Leave it before joining another.",
+                        )
+
+                # Connect the candidate before dropping the old room. A bad or
+                # offline token therefore cannot destroy a working session.
+                candidate = self._create_relay(target_room_key)
+                if not await candidate.connect():
+                    return False, "Failed to connect to relay"
+                if not await candidate.join(
+                    self.party_state.my_summoner_id,
+                    self.party_state.my_summoner_name,
+                ):
+                    await candidate.disconnect()
+                    return False, "Failed to join relay room"
+                if not await candidate.wait_for_member(
+                    token.summoner_id,
+                    timeout=MEMBER_CONFIRM_TIMEOUT,
+                ):
+                    await candidate.disconnect()
+                    return False, "Party host is not online"
+
+                old_relay = self._relay
+                self._relay = candidate
+                self._active_room_key = target_room_key
+                self._active_invite_token = token_str
+                self._host_summoner_id = token.summoner_id
+                self._room_role = "guest"
+
+                # Every member displays and shares the active room token, not
+                # the token for the empty room they created during enable().
+                self.party_state.my_token = token_str
+                self.party_state.room_role = self._room_role
+                self.party_state.host_summoner_id = self._host_summoner_id
+                self.party_state.set_connection_status("online")
+                self._sync_relay_members(
+                    candidate,
+                    candidate.get_members_snapshot(),
+                )
+                self._notify_state_change()
+
+                if old_relay:
+                    await old_relay.disconnect()
+
+                log.info(
+                    f"[PARTY] Joined party room {target_room_key[:8]}..."
+                )
                 return True, None
-
-            # Disconnect from current room and join the host's room
-            if self._relay:
-                await self._relay.disconnect()
-
-            self._relay = PartyRelay(target_room_key)
-            self._relay.set_on_members_changed(self._on_relay_members_changed)
-
-            if not await self._relay.connect():
-                return False, "Failed to connect to relay"
-
-            await self._relay.join(
-                self.party_state.my_summoner_id,
-                self.party_state.my_summoner_name,
-            )
-
-            log.info(f"[PARTY] Joined party room {target_room_key[:8]}...")
-            return True, None
 
         except ValueError as e:
             error_str = str(e)
@@ -208,13 +313,13 @@ class PartyManager:
             log.error(f"[PARTY] Failed to join party: {e}")
             return False, f"Unexpected error: {e}"
 
-    async def remove_peer(self, summoner_id: int):
-        """Remove a peer (not really applicable in shared room model, but kept for UI)."""
-        self.party_state.remove_peer(summoner_id)
-        if self._skin_collector:
-            self._skin_collector.clear_peer(summoner_id)
-        self._notify_state_change()
-        log.info(f"[PARTY] Removed peer {summoner_id}")
+    async def remove_peer(self, summoner_id: int) -> bool:
+        """Shared author relay has no kick operation."""
+        log.info(
+            f"[PARTY] Ignoring remove request for {summoner_id}: "
+            "relay does not support kicking members"
+        )
+        return False
 
     async def broadcast_skin_update(self):
         """Broadcast our current skin selection to the relay room."""
@@ -253,7 +358,11 @@ class PartyManager:
 
         # Collect skins from relay members
         return self._skin_collector.collect_relay_skins(
-            members=self._relay.members if self._relay else [],
+            members=(
+                self._relay.get_members_snapshot()
+                if self._relay
+                else []
+            ),
             my_summoner_id=self.party_state.my_summoner_id,
             team_champions=team_champions,
         )
@@ -263,32 +372,61 @@ class PartyManager:
 
     # ─── Relay callbacks ─────────────────────────────────────────────────
 
-    def _on_relay_members_changed(self, members: list):
+    def _create_relay(self, room_key: str) -> PartyRelay:
+        relay = PartyRelay(room_key)
+        relay.set_on_members_changed(
+            lambda members, source=relay: self._on_relay_members_changed(
+                source,
+                members,
+            )
+        )
+        relay.set_on_disconnected(
+            lambda reason, source=relay: self._on_relay_disconnected(
+                source,
+                reason,
+            )
+        )
+        return relay
+
+    def _on_relay_members_changed(
+        self,
+        relay: PartyRelay,
+        members: list,
+    ):
         """Called by the relay when the member list changes."""
+        if relay is not self._relay:
+            return
+        self._sync_relay_members(relay, members)
+
+    def _sync_relay_members(
+        self,
+        relay: PartyRelay,
+        members: list,
+    ):
+        if relay is not self._relay:
+            return
+
         my_id = self.party_state.my_summoner_id
 
         # Update party state with relay members (exclude ourselves)
         current_peer_ids = set()
         for member in members:
-            sid = member.get("summoner_id", 0)
+            if not isinstance(member, dict):
+                continue
+            sid = self._member_summoner_id(member)
             if sid == my_id or not sid:
                 continue
 
             current_peer_ids.add(sid)
-            name = member.get("summoner_name", "Unknown")
+            name = str(member.get("summoner_name") or "Unknown")[:64]
             skin = member.get("skin")
 
-            if sid not in self.party_state.peers:
-                self.party_state.add_peer(
-                    sid,
-                    summoner_name=name,
-                    connected=True,
-                    connection_state="connected",
-                )
-            else:
-                self.party_state.peers[sid].summoner_name = name
-                self.party_state.peers[sid].connected = True
-                self.party_state.peers[sid].connection_state = "connected"
+            self.party_state.update_peer(
+                sid,
+                summoner_name=name,
+                connected=True,
+                connection_state="connected",
+            )
 
             # Update skin selection
             if skin and self._skin_collector:
@@ -306,7 +444,11 @@ class PartyManager:
                     log.debug(f"[PARTY] Failed to update peer skin: {e}")
 
         # Remove peers that are no longer in the room
-        stale = [sid for sid in self.party_state.peers if sid not in current_peer_ids]
+        stale = [
+            sid
+            for sid in self.party_state.get_peer_ids()
+            if sid not in current_peer_ids
+        ]
         for sid in stale:
             self.party_state.remove_peer(sid)
             if self._skin_collector:
@@ -315,7 +457,93 @@ class PartyManager:
 
         self._notify_state_change()
 
+    def _on_relay_disconnected(
+        self,
+        relay: PartyRelay,
+        reason: Optional[str],
+    ):
+        if relay is not self._relay or not self._running or not self.enabled:
+            return
+
+        self.party_state.clear_peers()
+        self.party_state.set_connection_status(
+            "reconnecting",
+            error=reason or "Relay disconnected",
+        )
+        self._notify_state_change()
+
+        if not self._reconnect_task or self._reconnect_task.done():
+            self._reconnect_task = asyncio.create_task(
+                self._reconnect_loop()
+            )
+
     # ─── Background tasks ────────────────────────────────────────────────
+
+    async def _reconnect_loop(self):
+        attempt = 0
+        try:
+            while self._running and self.enabled:
+                delay = RECONNECT_DELAYS[min(attempt, len(RECONNECT_DELAYS) - 1)]
+                attempt += 1
+                await asyncio.sleep(delay)
+
+                room_key = self._active_room_key
+                my_id = self.party_state.my_summoner_id
+                my_name = self.party_state.my_summoner_name
+                if not room_key or not my_id:
+                    return
+
+                candidate = self._create_relay(room_key)
+                if not await candidate.connect():
+                    continue
+                if not await candidate.join(my_id, my_name):
+                    await candidate.disconnect()
+                    continue
+                if not await candidate.wait_for_member(
+                    my_id,
+                    timeout=MEMBER_CONFIRM_TIMEOUT,
+                ):
+                    await candidate.disconnect()
+                    continue
+
+                if (
+                    self._room_role == "guest"
+                    and self._host_summoner_id
+                    and not await candidate.wait_for_member(
+                        self._host_summoner_id,
+                        timeout=MEMBER_CONFIRM_TIMEOUT,
+                    )
+                ):
+                    await candidate.disconnect()
+                    continue
+
+                async with self._relay_lock:
+                    if (
+                        not self._running
+                        or room_key != self._active_room_key
+                    ):
+                        await candidate.disconnect()
+                        return
+
+                    old_relay = self._relay
+                    self._relay = candidate
+                    self.party_state.set_connection_status("online")
+                    self._sync_relay_members(
+                        candidate,
+                        candidate.get_members_snapshot(),
+                    )
+                    if old_relay and old_relay is not candidate:
+                        await old_relay.disconnect()
+
+                await self.broadcast_skin_update()
+                log.info("[PARTY] Relay connection restored")
+                self._notify_state_change()
+                return
+        except asyncio.CancelledError:
+            return
+        finally:
+            if asyncio.current_task() is self._reconnect_task:
+                self._reconnect_task = None
 
     async def _lobby_check_loop(self):
         """Check lobby membership and update peer status."""
@@ -326,15 +554,9 @@ class PartyManager:
                     continue
 
                 lobby_ids = self._lobby_matcher.get_all_summoner_ids()
-                for sid in self.party_state.peers:
+                for sid in self.party_state.get_peer_ids():
                     in_lobby = sid in lobby_ids
-                    if self.party_state.peers[sid].in_lobby != in_lobby:
-                        self.party_state.update_peer_lobby_status(sid, in_lobby)
-                        name = self.party_state.peers[sid].summoner_name
-                        if in_lobby:
-                            log.info(f"[PARTY] Peer {name} joined our lobby")
-                        else:
-                            log.info(f"[PARTY] Peer {name} left our lobby")
+                    self.party_state.update_peer_lobby_status(sid, in_lobby)
 
             except asyncio.CancelledError:
                 break
@@ -371,6 +593,40 @@ class PartyManager:
                 break
             except Exception as e:
                 log.info(f"[PARTY] Skin broadcast error: {e}")
+
+    async def _token_refresh_loop(self):
+        """Refresh the host invite without changing its room key."""
+        try:
+            while self._running:
+                await asyncio.sleep(TOKEN_REFRESH_CHECK_INTERVAL)
+                if (
+                    self._room_role != "host"
+                    or not self._my_token
+                    or not self._my_key
+                    or not self.party_state.my_summoner_id
+                ):
+                    continue
+                if self._my_token.time_until_expiry() > TOKEN_REFRESH_THRESHOLD:
+                    continue
+
+                self._my_token = create_token(
+                    summoner_id=self.party_state.my_summoner_id,
+                    encryption_key=self._my_key,
+                )
+                token_str = self._my_token.encode()
+                self._active_invite_token = token_str
+                self.party_state.my_token = token_str
+                self._notify_state_change()
+                log.info("[PARTY] Refreshed party invite token")
+        except asyncio.CancelledError:
+            return
+
+    @staticmethod
+    def _member_summoner_id(member: dict) -> int:
+        try:
+            return int(member.get("summoner_id", 0))
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _hash_custom_mod(mod_path: str) -> Optional[str]:

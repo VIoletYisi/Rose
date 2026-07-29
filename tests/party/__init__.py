@@ -1,0 +1,1 @@
+"""Party Mode regression tests."""

@@ -29,6 +29,10 @@ class PartyState:
 
     # Party mode status
     enabled: bool = False
+    relay_status: str = "offline"
+    room_role: str = "none"
+    host_summoner_id: Optional[int] = None
+    last_error: Optional[str] = None
     my_token: Optional[str] = None
     my_summoner_id: Optional[int] = None
     my_summoner_name: str = "Unknown"
@@ -63,11 +67,36 @@ class PartyState:
                     connection_state=connection_state,
                 )
 
+    def update_peer(
+        self,
+        summoner_id: int,
+        *,
+        summoner_name: Optional[str] = None,
+        connected: Optional[bool] = None,
+        connection_state: Optional[str] = None,
+        in_lobby: Optional[bool] = None,
+    ):
+        """Atomically update an existing peer, creating it if necessary."""
+        with self._lock:
+            peer = self.peers.get(summoner_id)
+            if peer is None:
+                peer = PartyPeerState(summoner_id=summoner_id)
+                self.peers[summoner_id] = peer
+            if summoner_name is not None:
+                peer.summoner_name = summoner_name
+            if connected is not None:
+                peer.connected = connected
+            if connection_state is not None:
+                peer.connection_state = connection_state
+            if in_lobby is not None:
+                peer.in_lobby = in_lobby
+
     def remove_peer(self, summoner_id: int):
         """Remove a peer"""
         with self._lock:
             if summoner_id in self.peers:
                 del self.peers[summoner_id]
+            self.party_skins.pop(summoner_id, None)
 
     def update_peer_connection(self, summoner_id: int, connected: bool):
         """Update peer connection status"""
@@ -92,10 +121,11 @@ class PartyState:
         with self._lock:
             if summoner_id in self.peers:
                 self.peers[summoner_id].skin_selection = selection
-                # Also update party_skins for easy lookup by champion
-                self.party_skins[selection.champion_id] = {
+                # Key by summoner ID so duplicate-champion modes do not collide.
+                self.party_skins[summoner_id] = {
                     "summoner_id": selection.summoner_id,
                     "summoner_name": selection.summoner_name,
+                    "champion_id": selection.champion_id,
                     "skin_id": selection.skin_id,
                     "chroma_id": selection.chroma_id,
                     "custom_mod_path": selection.custom_mod_path,
@@ -107,14 +137,42 @@ class PartyState:
             if summoner_id in self.peers:
                 old_selection = self.peers[summoner_id].skin_selection
                 self.peers[summoner_id].skin_selection = None
-                # Remove from party_skins
                 if old_selection:
-                    self.party_skins.pop(old_selection.champion_id, None)
+                    self.party_skins.pop(summoner_id, None)
+
+    def clear_all_skins(self):
+        """Clear every peer selection while keeping room membership."""
+        with self._lock:
+            for peer in self.peers.values():
+                peer.skin_selection = None
+            self.party_skins.clear()
+
+    def clear_peers(self):
+        """Clear relay membership without disabling Party Mode."""
+        with self._lock:
+            self.peers.clear()
+            self.party_skins.clear()
+
+    def set_connection_status(
+        self,
+        status: str,
+        *,
+        error: Optional[str] = None,
+    ):
+        """Set the relay lifecycle state exposed to the UI."""
+        with self._lock:
+            self.relay_status = status
+            self.last_error = error
 
     def get_connected_peers(self) -> List[PartyPeerState]:
         """Get list of connected peers"""
         with self._lock:
             return [p for p in self.peers.values() if p.connected]
+
+    def get_peer_ids(self) -> List[int]:
+        """Return a stable snapshot of peer summoner IDs."""
+        with self._lock:
+            return list(self.peers)
 
     def get_lobby_peers(self) -> List[PartyPeerState]:
         """Get list of peers in the current lobby"""
@@ -134,7 +192,13 @@ class PartyState:
         """Clear all party state"""
         with self._lock:
             self.enabled = False
+            self.relay_status = "offline"
+            self.room_role = "none"
+            self.host_summoner_id = None
+            self.last_error = None
             self.my_token = None
+            self.my_summoner_id = None
+            self.my_summoner_name = "Unknown"
             self.peers.clear()
             self.party_skins.clear()
 
@@ -143,6 +207,10 @@ class PartyState:
         with self._lock:
             return {
                 "enabled": self.enabled,
+                "relay_status": self.relay_status,
+                "room_role": self.room_role,
+                "host_summoner_id": self.host_summoner_id,
+                "last_error": self.last_error,
                 "my_token": self.my_token,
                 "my_summoner_id": self.my_summoner_id,
                 "my_summoner_name": self.my_summoner_name,
