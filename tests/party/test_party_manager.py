@@ -1,5 +1,7 @@
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -240,6 +242,36 @@ class PartyManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual({}, manager._team_champions)
             self.assertIsNone(relay.sent_skins[-1])
             await manager.disable()
+
+    def test_custom_mod_directory_hash_can_be_found_locally(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            mod_dir = (
+                data_dir
+                / "mods"
+                / "skins"
+                / "99000"
+                / "my-custom-mod"
+            )
+            mod_dir.mkdir(parents=True)
+            (mod_dir / "assets" / "test.wad.client").parent.mkdir()
+            (mod_dir / "assets" / "test.wad.client").write_bytes(
+                b"party custom mod"
+            )
+
+            with patch(
+                "utils.core.paths.get_user_data_dir",
+                return_value=data_dir,
+            ):
+                content_hash = PartyManager._hash_custom_mod(
+                    "skins/99000/my-custom-mod"
+                )
+                match = PartyManager.find_local_mod_by_hash(
+                    content_hash,
+                    champion_id=99,
+                )
+
+        self.assertEqual("skins/99000/my-custom-mod", match)
 
 
 if __name__ == "__main__":

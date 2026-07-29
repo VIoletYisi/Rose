@@ -90,12 +90,20 @@ class SkinCollectorTests(unittest.TestCase):
                 "summoner_id": 201,
                 "skin": {"champion_id": 99, "skin_id": 103001},
             },
+            {
+                "summoner_id": 202,
+                "skin": {
+                    "champion_id": 99,
+                    "skin_id": 99007,
+                    "chroma_id": 103002,
+                },
+            },
         ]
 
         skins = collector.collect_relay_skins(
             members,
             my_summoner_id=100,
-            team_champions={200: 99, 201: 99},
+            team_champions={200: 99, 201: 99, 202: 99},
         )
 
         # The first entry for 200 is authoritative and mismatched; a duplicate

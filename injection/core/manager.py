@@ -192,8 +192,8 @@ class InjectionManager:
             self._stop_monitor()
     
     def _check_and_inject_mods_only(self):
-        """Mods-only injection is disabled because the installed mods directory was removed."""
-        log.info("[INJECT] Mods-only injection skipped (installed mods folder removed)")
+        """Inject current Party skins when no local skin archive is required."""
+        return self.inject_party_mods_immediately()
     
     def on_loadout_countdown(self, seconds_remaining: int):
         """Called during loadout countdown - no longer used (monitor starts with injection)"""
@@ -219,24 +219,22 @@ class InjectionManager:
                     # Check if this is a base skin (skin ID 0 or champion's base skin ID like 36000 for champ 36)
                     # Base skins typically have ID = champion_id * 1000
                     if skin_id == 0:
-                        log.info("[INJECT] Base skin detected (skinId=0) - injection skipped")
-                        report_issue(
-                            "INJECTION_SKIPPED_BASE_SKIN",
-                            "info",
-                            "Injection skipped (base skin selected).",
-                            details={"skin": skin_name, "skin_id": 0},
+                        log.info(
+                            "[INJECT] Base skin detected (skinId=0); "
+                            "checking Party skins"
                         )
-                        return False
+                        return self.inject_party_mods_immediately(
+                            stop_callback=stop_callback
+                        )
                     # Check if it matches base skin pattern (champion_id * 1000)
                     if champion_id and skin_id == champion_id * 1000:
-                        log.info(f"[INJECT] Base skin detected (skinId={skin_id} for champion {champion_id}) - injection skipped")
-                        report_issue(
-                            "INJECTION_SKIPPED_BASE_SKIN",
-                            "info",
-                            "Injection skipped (base skin selected).",
-                            details={"skin": skin_name, "skin_id": skin_id, "champion_id": champion_id},
+                        log.info(
+                            f"[INJECT] Base skin detected (skinId={skin_id} "
+                            f"for champion {champion_id}); checking Party skins"
                         )
-                        return False
+                        return self.inject_party_mods_immediately(
+                            stop_callback=stop_callback
+                        )
             except (ValueError, IndexError):
                 pass  # Not a numeric skin ID, continue with normal injection
         
@@ -304,20 +302,8 @@ class InjectionManager:
                 log.info("[INJECT] Starting game monitor for injection")
                 self._start_monitor()
             
-            # Build optional callback to add party member skins to injection
-            extra_mods_callback = None
-            if self.shared_state:
-                party_manager = getattr(self.shared_state, "party_manager", None)
-                if party_manager and getattr(party_manager, "enabled", False):
-                    try:
-                        from party.integration.injection_hook import PartyInjectionHook
-                        party_hook = PartyInjectionHook(
-                            party_manager, self.shared_state, self
-                        )
-                        if party_hook.is_enabled():
-                            extra_mods_callback = lambda inj: party_hook.prepare_party_mods(inj)
-                    except Exception as e:
-                        log.debug(f"[INJECT] Party injection hook not used: {e}")
+            # Build optional callback to add party member skins to injection.
+            extra_mods_callback = self._get_party_mods_callback()
 
             # Pass the manager instance so injector can call resume_game()
             success = self.injector.inject_skin(
@@ -342,6 +328,102 @@ class InjectionManager:
             
             # Stop monitor after injection completes (this will resume game if still suspended)
             # Note: Monitor may have already stopped if game ended, but that's fine
+            self._stop_monitor()
+
+    def _get_party_mods_callback(self):
+        if not self.shared_state:
+            return None
+        party_manager = getattr(self.shared_state, "party_manager", None)
+        if not party_manager or not getattr(party_manager, "enabled", False):
+            return None
+        try:
+            from party.integration.injection_hook import PartyInjectionHook
+
+            party_hook = PartyInjectionHook(
+                party_manager,
+                self.shared_state,
+                self,
+            )
+            if not party_hook.is_enabled():
+                return None
+            if not party_hook.get_party_skins_for_injection():
+                return None
+            return lambda injector: party_hook.prepare_party_mods(injector)
+        except Exception as e:
+            log.debug(f"[INJECT] Party injection hook not used: {e}")
+            return None
+
+    def inject_party_mods_immediately(self, stop_callback=None) -> bool:
+        """Inject teammates' Party skins without requiring a local skin ZIP."""
+        self._ensure_initialized()
+        self.refresh_injection_threshold()
+
+        if (
+            not self._initialized
+            or self.injector is None
+            or self.injector.game_dir is None
+        ):
+            log.error("[INJECT] Cannot inject Party skins - League path not found")
+            return False
+
+        extra_mods_callback = self._get_party_mods_callback()
+        if not extra_mods_callback:
+            log.info("[INJECT] No Party skins are ready for this team")
+            return False
+
+        if self._injection_in_progress:
+            log.warning("[INJECT] Another injection is already in progress")
+            return False
+
+        lock_acquired = self.injection_lock.acquire(
+            timeout=INJECTION_LOCK_TIMEOUT_S
+        )
+        if not lock_acquired:
+            log.warning("[INJECT] Could not acquire lock for Party injection")
+            return False
+
+        try:
+            self._injection_in_progress = True
+            current_time = time.time()
+            elapsed = current_time - self.last_injection_time
+            if (
+                self.last_injection_time
+                and elapsed < self.injection_threshold
+            ):
+                remaining = self.injection_threshold - elapsed
+                log.debug(
+                    f"[INJECT] Party-only injection waiting on cooldown "
+                    f"({remaining:.2f}s remaining)"
+                )
+                return False
+
+            ui_skin_thread = getattr(
+                self.shared_state,
+                "ui_skin_thread",
+                None,
+            )
+            if ui_skin_thread:
+                try:
+                    ui_skin_thread.force_disconnect()
+                except Exception as e:
+                    log.debug(f"[INJECT] Failed to disconnect UIA: {e}")
+
+            if not self._monitor_active:
+                log.info("[INJECT] Starting game monitor for Party injection")
+                self._start_monitor()
+
+            success = self.injector.inject_mods_only(
+                stop_callback=stop_callback,
+                injection_manager=self,
+                extra_mods_callback=extra_mods_callback,
+            )
+            if success:
+                self.last_skin_name = "party-only"
+                self.last_injection_time = current_time
+            return success
+        finally:
+            self._injection_in_progress = False
+            self.injection_lock.release()
             self._stop_monitor()
     
     def inject_skin_for_testing(self, skin_name: str) -> bool:

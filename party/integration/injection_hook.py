@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import List, Optional
 
 from state import SharedState
+from utils.core.junction import is_junction, link_or_extract, safe_remove_entry
 from utils.core.logging import get_logger
+from utils.core.paths import get_injection_dir, get_user_data_dir
 
 from ..core.party_manager import PartyManager
 from ..discovery.skin_collector import PartySkinData
@@ -87,8 +89,18 @@ class PartyInjectionHook:
             return []
 
         mod_folder_names = []
+        seen_selections = set()
 
         for skin_data in party_skins:
+            selection_key = (
+                skin_data.champion_id,
+                skin_data.skin_id,
+                skin_data.chroma_id,
+                skin_data.custom_mod_path,
+            )
+            if selection_key in seen_selections:
+                continue
+            seen_selections.add(selection_key)
             try:
                 mod_name = self._prepare_single_skin(
                     skin_data=skin_data,
@@ -122,40 +134,56 @@ class PartyInjectionHook:
         chroma_id = skin_data.chroma_id
         custom_mod_path = skin_data.custom_mod_path
 
-        # Determine skin name for ZIP resolution
-        skin_name = f"skin_{skin_id}"
-
         if custom_mod_path:
             # Party member has a custom mod that we also have locally (matched by hash)
-            from utils.core.paths import get_user_data_dir
-            mods_root = get_user_data_dir() / "mods"
-            local_mod = mods_root / custom_mod_path
-            if local_mod.exists():
-                log.info(
-                    f"[PARTY_INJECT] {skin_data.summoner_name} has custom mod, "
-                    f"using local match: {custom_mod_path}"
-                )
-                try:
-                    mod_folder = injector._extract_zip_to_mod(local_mod)
-                    if mod_folder:
-                        log.info(
-                            f"[PARTY_INJECT] Prepared {skin_data.summoner_name}'s custom mod: "
-                            f"{mod_folder.name}"
-                        )
-                        return mod_folder.name
-                except Exception as e:
-                    log.warning(f"[PARTY_INJECT] Failed to extract custom mod: {e}")
-                    return None
-            else:
+            local_mod = self._safe_local_mod_path(custom_mod_path)
+            if not local_mod:
                 log.warning(
                     f"[PARTY_INJECT] Custom mod path not found: {custom_mod_path}"
                 )
                 return None
+            log.info(
+                f"[PARTY_INJECT] {skin_data.summoner_name} has custom mod, "
+                f"using local content match: {custom_mod_path}"
+            )
+            try:
+                folder_name = self._stage_custom_mod(
+                    injector,
+                    local_mod,
+                    skin_data.summoner_id,
+                )
+                if folder_name:
+                    log.info(
+                        f"[PARTY_INJECT] Prepared {skin_data.summoner_name}'s "
+                        f"custom mod: {folder_name}"
+                    )
+                    return folder_name
+            except Exception as e:
+                log.warning(f"[PARTY_INJECT] Failed to stage custom mod: {e}")
+            return None
+
+        # The champion's default skin needs no overlay. This previously
+        # produced a failed ZIP lookup and hid otherwise valid Party results.
+        if skin_id == champion_id * 1000 and not chroma_id:
+            log.debug(
+                f"[PARTY_INJECT] {skin_data.summoner_name} uses the default "
+                f"skin for champion {champion_id}; no mod needed"
+            )
+            return None
+
+        # Resolve chromas with their own identifier. For historic/random
+        # selections where only skin_id is known, ZipResolver already falls
+        # back from skin_{id} to a chroma search.
+        if chroma_id:
+            skin_name = f"chroma_{chroma_id}"
+        else:
+            skin_name = f"skin_{skin_id}"
 
         # Resolve the skin ZIP
         try:
             zip_path = injector._resolve_zip(
                 skin_name,
+                chroma_id=chroma_id,
                 skin_name=skin_name,
                 champion_name=None,
                 champion_id=champion_id,
@@ -180,6 +208,42 @@ class PartyInjectionHook:
         except Exception as e:
             log.warning(f"[PARTY_INJECT] Failed to resolve/extract skin: {e}")
 
+        return None
+
+    @staticmethod
+    def _safe_local_mod_path(relative_path: str) -> Optional[Path]:
+        try:
+            mods_root = (get_user_data_dir() / "mods").resolve()
+            local_mod = (mods_root / relative_path).resolve()
+            local_mod.relative_to(mods_root)
+            return local_mod if local_mod.exists() else None
+        except (OSError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _stage_custom_mod(
+        injector,
+        local_mod: Path,
+        summoner_id: int,
+    ) -> Optional[str]:
+        """Stage both extracted modern mods and legacy archives."""
+        safe_name = "".join(
+            char if char.isalnum() or char in "-_." else "_"
+            for char in local_mod.stem
+        ).strip("._")
+        if not safe_name:
+            safe_name = "custom"
+        destination = (
+            injector.mods_dir
+            / f"party-{int(summoner_id)}-{safe_name}"
+        )
+        if destination.exists() or is_junction(destination):
+            safe_remove_entry(destination)
+
+        cache_dir = get_injection_dir() / ".extract_cache"
+        link_or_extract(local_mod, destination, cache_dir=cache_dir)
+        if destination.exists() or is_junction(destination):
+            return destination.name
         return None
 
     def get_injection_summary(self) -> dict:

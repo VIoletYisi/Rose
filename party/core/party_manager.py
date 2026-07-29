@@ -7,7 +7,9 @@ Orchestrator for party mode skin sharing via WebSocket relay.
 
 import asyncio
 import copy
+import hashlib
 import secrets
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from lcu import LCU
@@ -695,63 +697,115 @@ class PartyManager:
 
     @staticmethod
     def _hash_custom_mod(mod_path: str) -> Optional[str]:
-        """Compute a content hash of a custom mod zip file."""
-        import hashlib
+        """Compute a stable hash for an imported mod archive or directory."""
         from utils.core.paths import get_user_data_dir
 
         try:
-            mods_root = get_user_data_dir() / "mods"
-            full_path = mods_root / mod_path
-            if not full_path.exists():
-                return None
-
-            h = hashlib.sha256()
-            with open(full_path, "rb") as f:
-                for chunk in iter(lambda: f.read(65536), b""):
-                    h.update(chunk)
-            return h.hexdigest()[:16]
+            mods_root = (get_user_data_dir() / "mods").resolve()
+            full_path = (mods_root / mod_path).resolve()
+            full_path.relative_to(mods_root)
+            return PartyManager._hash_mod_path(full_path)
         except Exception as e:
             log.debug(f"[PARTY] Failed to hash custom mod: {e}")
             return None
 
     @staticmethod
     def find_local_mod_by_hash(content_hash: str, champion_id: int) -> Optional[str]:
-        """Search local mods for a zip matching the given content hash.
+        """Search modern and legacy skin-mod storage for a content match.
 
         Returns:
             Relative path to the matching mod (from mods root), or None.
         """
-        import hashlib
         from utils.core.paths import get_user_data_dir
 
         try:
+            content_hash = str(content_hash).strip().lower()
+            if len(content_hash) != 16 or any(
+                char not in "0123456789abcdef" for char in content_hash
+            ):
+                return None
+
+            champion_id = int(champion_id)
             mods_root = get_user_data_dir() / "mods"
             skins_dir = mods_root / "skins"
             if not skins_dir.exists():
                 return None
 
-            # Scan all mod zips
-            for skin_dir in skins_dir.iterdir():
-                if not skin_dir.is_dir():
+            # Modern storage uses skins/{champion_id * 1000}/{mod folder}.
+            # Older builds may have used skins/{skin_id}/{archive}.
+            for storage_dir in sorted(skins_dir.iterdir()):
+                if not storage_dir.is_dir():
                     continue
-                for mod_file in skin_dir.iterdir():
-                    if not mod_file.is_file():
+                try:
+                    storage_id = int(storage_dir.name)
+                except ValueError:
+                    continue
+                if (
+                    storage_id != champion_id
+                    and storage_id // 1000 != champion_id
+                ):
+                    continue
+
+                for candidate in sorted(storage_dir.iterdir()):
+                    if candidate.name in {
+                        "rose_mod_targets.json",
+                        "rose_wad_targets.json",
+                    }:
                         continue
-                    if mod_file.suffix.lower() not in (".zip", ".fantome"):
+                    if not (
+                        candidate.is_dir()
+                        or (
+                            candidate.is_file()
+                            and candidate.suffix.lower() in (".zip", ".fantome")
+                        )
+                    ):
                         continue
                     try:
-                        h = hashlib.sha256()
-                        with open(mod_file, "rb") as f:
-                            for chunk in iter(lambda: f.read(65536), b""):
-                                h.update(chunk)
-                        if h.hexdigest()[:16] == content_hash:
-                            return str(mod_file.relative_to(mods_root))
+                        if PartyManager._hash_mod_path(candidate) == content_hash:
+                            return candidate.relative_to(mods_root).as_posix()
                     except Exception:
                         continue
         except Exception as e:
             log.debug(f"[PARTY] Error searching local mods: {e}")
 
         return None
+
+    @staticmethod
+    def _hash_mod_path(mod_path: Path) -> Optional[str]:
+        """Hash a mod without depending on its outer directory name."""
+        path = Path(mod_path)
+        if path.is_file():
+            digest = hashlib.sha256()
+            digest.update(b"file\0")
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()[:16]
+
+        if not path.is_dir():
+            return None
+
+        digest = hashlib.sha256()
+        digest.update(b"directory\0")
+        files = sorted(
+            (
+                file_path
+                for file_path in path.rglob("*")
+                if file_path.is_file() and not file_path.is_symlink()
+            ),
+            key=lambda item: item.relative_to(path).as_posix().casefold(),
+        )
+        if not files:
+            return None
+        for file_path in files:
+            relative = file_path.relative_to(path).as_posix()
+            digest.update(relative.casefold().encode("utf-8"))
+            digest.update(b"\0")
+            with file_path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            digest.update(b"\0")
+        return digest.hexdigest()[:16]
 
     def _notify_state_change(self):
         if self._on_state_change:

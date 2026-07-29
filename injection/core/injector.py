@@ -236,10 +236,69 @@ class SkinInjector:
         
         return result == 0
     
-    def inject_mods_only(self, timeout: int = 60, stop_callback=None, injection_manager=None) -> bool:
-        """Disabled: installed mods folder removed"""
-        log.warning("[INJECT] Mods-only injection is disabled (installed mods folder removed)")
-        return False
+    def inject_mods_only(
+        self,
+        timeout: int = 120,
+        stop_callback=None,
+        injection_manager=None,
+        extra_mods_callback: Optional[
+            Callable[["SkinInjector"], List[str]]
+        ] = None,
+    ) -> bool:
+        """Build an overlay from callback-provided mods without a local skin.
+
+        Party Mode needs this path when the local player uses the champion's
+        default skin but one or more teammates selected an injectable skin.
+        """
+        if not extra_mods_callback:
+            log.debug("[INJECT] No mods callback supplied for mods-only injection")
+            return False
+
+        injection_start_time = time.time()
+        try:
+            self._clean_mods_dir()
+            self._clean_overlay_dir()
+
+            raw_mod_names = extra_mods_callback(self) or []
+            mod_names = []
+            seen = set()
+            for raw_name in raw_mod_names:
+                name = str(raw_name or "").strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                mod_names.append(name)
+
+            if not mod_names:
+                log.info("[INJECT] Party members have no local mods to inject")
+                if injection_manager:
+                    injection_manager.resume_if_suspended()
+                return False
+
+            result = self._mk_run_overlay(
+                mod_names,
+                timeout,
+                stop_callback,
+                injection_manager,
+            )
+            total_duration = time.time() - injection_start_time
+            if result == 0:
+                log.info(
+                    f"[INJECT] Party-only overlay completed in "
+                    f"{total_duration:.2f}s with {len(mod_names)} mod(s)"
+                )
+                return True
+
+            log.warning(
+                f"[INJECT] Party-only overlay failed with code {result} "
+                f"after {total_duration:.2f}s"
+            )
+            return False
+        except Exception as e:
+            log.error(f"[INJECT] Party-only injection failed: {e}")
+            if injection_manager:
+                injection_manager.resume_if_suspended()
+            return False
     
     def inject_skin_for_testing(self, skin_name: str) -> bool:
         """Inject a skin for testing - stops overlay immediately after mkoverlay"""

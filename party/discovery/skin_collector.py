@@ -123,7 +123,18 @@ class SkinCollector:
             skin_id = self._positive_int(historic_value)
             if skin_id is None and isinstance(historic_value, str):
                 custom_mod_path = self._historic_custom_mod_path(historic_value)
-                skin_id = self._skin_id_from_mod_path(custom_mod_path)
+                try:
+                    from utils.core.historic import (
+                        get_historic_target_for_champion,
+                    )
+
+                    skin_id = self._positive_int(
+                        get_historic_target_for_champion(champion_id)
+                    )
+                except Exception:
+                    skin_id = None
+                if skin_id is None:
+                    skin_id = self._skin_id_from_mod_path(custom_mod_path)
         elif getattr(self.state, "random_mode_active", False):
             skin_id = self._positive_int(
                 getattr(self.state, "random_skin_id", None)
@@ -316,6 +327,16 @@ class SkinCollector:
                     f"champion {champion_id}; ignoring relay member {sid}"
                 )
                 continue
+            chroma_id = self._positive_int(skin.get("chroma_id"))
+            if (
+                chroma_id is not None
+                and not self._skin_matches_champion(chroma_id, champion_id)
+            ):
+                log.warning(
+                    f"[SKIN_COLLECT] Chroma {chroma_id} does not belong to "
+                    f"champion {champion_id}; ignoring relay member {sid}"
+                )
+                continue
 
             # For custom mods, try to find a local match by content hash
             custom_mod_path = None
@@ -336,7 +357,7 @@ class SkinCollector:
                 summoner_name=member.get("summoner_name", "Unknown"),
                 champion_id=champion_id,
                 skin_id=skin_id,
-                chroma_id=self._positive_int(skin.get("chroma_id")),
+                chroma_id=chroma_id,
                 custom_mod_path=custom_mod_path,
                 is_local=False,
             ))

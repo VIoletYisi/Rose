@@ -717,9 +717,16 @@ class InjectionTrigger:
             # already overrides to the saved skin and injection should proceed normally)
             historic_active = getattr(self.state, 'historic_mode_active', False)
             if ui_skin_id is not None and is_default_skin(ui_skin_id) and not historic_active:
-                log.info(f"[INJECT] skipping injection for default skin (skinId={ui_skin_id}) - no mods selected")
+                log.info(
+                    f"[INJECT] Local player uses default skin "
+                    f"(skinId={ui_skin_id}); checking Party skins"
+                )
                 if self.injection_manager:
-                    self.injection_manager.resume_if_suspended()
+                    party_injected = (
+                        self.injection_manager.inject_party_mods_immediately()
+                    )
+                    if not party_injected:
+                        self.injection_manager.resume_if_suspended()
                 champ_id = self.state.locked_champ_id or self.state.hovered_champ_id
                 if champ_id:
                     from utils.core.historic import clear_historic_entry
@@ -1589,4 +1596,3 @@ class InjectionTrigger:
             log.error(f"[INJECT] Error injecting custom mod: {e}")
             import traceback
             log.error(f"[INJECT] Traceback: {traceback.format_exc()}")
-
