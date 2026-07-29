@@ -36,6 +36,22 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Configure Party relay
+        shell: pwsh
+        env:
+          ROSE_RELAY_URL: ${{ secrets.ROSE_RELAY_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:ROSE_RELAY_URL)) {
+              throw "ROSE_RELAY_URL secret is not configured."
+          }
+
+          python -c "import os; from pathlib import Path; u=os.environ['ROSE_RELAY_URL'].strip(); assert u.startswith('wss://'); Path('party/network/relay_config.py').write_text('RELAY_URL = ' + repr(u) + '\n', encoding='utf-8')"
+
+      - name: Verify Party relay configuration
+        shell: pwsh
+        run: |
+          python -c "from party.network.ws_relay import RELAY_URL; assert RELAY_URL.startswith('wss://'); print('Party relay configuration embedded successfully.')"
+
       - name: Build Rose
         shell: pwsh
         run: |
